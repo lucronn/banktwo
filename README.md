@@ -36,7 +36,8 @@ overridden with `UPSTREAM_BASE_URL`, which must be an HTTPS origin.
 - `GET /v1/content/carids/{carId}/search/{term}`
 - `GET /v1/content/carids/{carId}/resource?path={encodedProviderPath}` for a
   resource path under that same vehicle's AutoAPItwo content namespace; add
-  `binary=true` for image/binary resources.
+  `sourceQuery={encodedQuery}` when returned by the provider and `binary=true`
+  for image/binary resources.
 - `GET /healthz`, `GET /readyz`
 
 OpenAPI JSON is at `/openapi.json`, with Swagger UI at `/docs`. Successful
@@ -49,7 +50,8 @@ Errors use a sanitized JSON envelope and never include upstream response bodies.
 - Only fixed fleet routes and paths scoped under the requested vehicle's
   content resource are accepted.
 - GET-only methods, bounded timeout and response size, bounded in-memory cache,
-  request coalescing, and per-client rate limits.
+  bounded concurrent upstream reads, request coalescing, and per-client rate
+  limits.
 - Caller input cannot select an upstream origin or cross vehicle content IDs.
 
 ## Verify

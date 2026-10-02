@@ -1,7 +1,13 @@
 export type ErrorCode = "invalid_request" | "client_rate_limited" | "upstream_error" | "upstream_timeout" | "upstream_response_too_large" | "internal_error";
 
 export class ConnectorError extends Error {
-  constructor(readonly code: ErrorCode, message: string, readonly status: number, readonly upstreamStatus?: number) {
+  constructor(
+    readonly code: ErrorCode,
+    message: string,
+    readonly status: number,
+    readonly upstreamStatus?: number,
+    readonly retryAfterSeconds?: number,
+  ) {
     super(message);
   }
 }

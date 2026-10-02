@@ -8,6 +8,10 @@ type CacheValue = { expiresAt: number; response: UpstreamResponse };
 export class UpstreamClient {
   private readonly cache = new Map<string, CacheValue>();
   private readonly pending = new Map<string, Promise<UpstreamResponse>>();
+  private cacheBytes = 0;
+  private activeRequests = 0;
+  private retryAt = 0;
+  private readonly requestQueue: Array<() => void> = [];
   constructor(private readonly config: Config, private readonly fetcher: typeof fetch = fetch) {}
 
   async read(path: string, accept: string, ttlSeconds = this.config.cacheTtlSeconds): Promise<UpstreamResponse> {
@@ -15,12 +19,21 @@ export class UpstreamClient {
     const key = `${url}\n${accept}`;
     const cached = this.cache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.response;
-    if (cached) this.cache.delete(key);
+    if (cached) { this.cache.delete(key); this.cacheBytes -= cached.response.body.byteLength; }
     const pending = this.pending.get(key);
     if (pending) return pending;
     const request = this.fetchResponse(url, accept).then((response) => {
-      this.cache.set(key, { expiresAt: Date.now() + ttlSeconds * 1000, response });
-      while (this.cache.size > this.config.maxCacheEntries) this.cache.delete(this.cache.keys().next().value!);
+      if (response.body.byteLength <= this.config.maxCacheBytes) {
+        this.cache.set(key, { expiresAt: Date.now() + ttlSeconds * 1000, response });
+        this.cacheBytes += response.body.byteLength;
+        while (this.cache.size > this.config.maxCacheEntries || this.cacheBytes > this.config.maxCacheBytes) {
+          const firstKey = this.cache.keys().next().value;
+          if (firstKey === undefined) break;
+          const evicted = this.cache.get(firstKey);
+          this.cache.delete(firstKey);
+          if (evicted) this.cacheBytes -= evicted.response.body.byteLength;
+        }
+      }
       return response;
     }).finally(() => this.pending.delete(key));
     this.pending.set(key, request);
@@ -28,18 +41,47 @@ export class UpstreamClient {
   }
 
   private safeUrl(path: string): string {
-    if (!path.startsWith("/api/v1/fleet/") && !path.startsWith("/api/v1/content/carids/")) {
+    let url: URL;
+    try { url = new URL(path, this.config.upstreamBaseUrl); }
+    catch { throw new ConnectorError("invalid_request", "Invalid upstream resource path", 400); }
+    if (url.origin !== this.config.upstreamBaseUrl || (!url.pathname.startsWith("/api/v1/fleet/") && !url.pathname.startsWith("/api/v1/content/carids/"))) {
       throw new ConnectorError("invalid_request", "Only vehicle catalog and vehicle content resources are allowed", 400);
     }
-    if (path.includes("\\") || /%2f|%5c|%2e/i.test(path) || path.split("/").some((part) => part === "." || part === "..")) {
+    if (url.pathname.includes("\\") || /%2f|%5c|%2e/i.test(url.pathname) || url.pathname.split("/").some((part) => part === "." || part === "..") || url.hash) {
       throw new ConnectorError("invalid_request", "Invalid upstream resource path", 400);
     }
-    const url = new URL(path, this.config.upstreamBaseUrl);
-    if (url.origin !== this.config.upstreamBaseUrl) throw new ConnectorError("invalid_request", "Invalid upstream resource origin", 400);
     return url.toString();
   }
 
   private async fetchResponse(url: string, accept: string): Promise<UpstreamResponse> {
+    if (this.activeRequests >= this.config.maxConcurrentUpstream) await new Promise<void>((resolve) => this.requestQueue.push(resolve));
+    this.activeRequests += 1;
+    try { return await this.fetchBounded(url, accept); }
+    finally { this.activeRequests -= 1; this.requestQueue.shift()?.(); }
+  }
+
+  private async fetchBounded(url: string, accept: string): Promise<UpstreamResponse> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < this.config.retryAttempts; attempt += 1) {
+      const cooldown = this.retryAt - Date.now();
+      if (cooldown > 0) await new Promise((resolve) => setTimeout(resolve, cooldown));
+      try { return await this.fetchOnce(url, accept); }
+      catch (error) {
+        lastError = error;
+        const transientStatus = error instanceof ConnectorError && [429, 502, 503, 504].includes(error.upstreamStatus ?? 0);
+        const transientTransport = error instanceof ConnectorError && ["upstream_timeout", "upstream_error"].includes(error.code) && error.upstreamStatus === undefined;
+        if ((!transientStatus && !transientTransport) || attempt + 1 >= this.config.retryAttempts) throw error;
+        const exponential = this.config.retryDelayMs * (2 ** attempt) / 1000;
+        const retryAfter = error instanceof ConnectorError ? error.retryAfterSeconds ?? 0 : 0;
+        const delaySeconds = Math.min(this.config.retryAfterCapSeconds, Math.max(exponential, retryAfter));
+        if (error instanceof ConnectorError && error.upstreamStatus === 429) this.retryAt = Math.max(this.retryAt, Date.now() + delaySeconds * 1000);
+        if (delaySeconds > 0) await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+      }
+    }
+    throw lastError;
+  }
+
+  private async fetchOnce(url: string, accept: string): Promise<UpstreamResponse> {
     let response: Response;
     try {
       response = await this.fetcher(url, { method: "GET", headers: { accept }, redirect: "manual", signal: AbortSignal.timeout(this.config.requestTimeoutMs) });
@@ -48,7 +90,10 @@ export class UpstreamClient {
       throw new ConnectorError("upstream_error", "AutoAPItwo could not be reached", 502);
     }
     if (response.status >= 300 && response.status < 400) throw new ConnectorError("upstream_error", "AutoAPItwo returned an unexpected redirect", 502, response.status);
-    if (!response.ok) throw new ConnectorError("upstream_error", "AutoAPItwo request failed", 502, response.status);
+    if (!response.ok) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      throw new ConnectorError("upstream_error", "AutoAPItwo request failed", 502, response.status, Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : undefined);
+    }
     const reader = response.body?.getReader();
     if (!reader) throw new ConnectorError("upstream_error", "AutoAPItwo returned an empty response", 502, response.status);
     const chunks: Uint8Array[] = [];

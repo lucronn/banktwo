@@ -5,7 +5,8 @@ import type { Config } from "../src/config.js";
 
 const config: Config = {
   host: "127.0.0.1", port: 3001, upstreamBaseUrl: "https://autoapitwo.test",
-  requestTimeoutMs: 500, maxResponseBytes: 1024, maxCacheEntries: 8,
+  requestTimeoutMs: 500, retryAttempts: 3, retryDelayMs: 0, retryAfterCapSeconds: 0,
+  maxResponseBytes: 1024, maxCacheEntries: 8, maxCacheBytes: 4096, maxConcurrentUpstream: 2,
   cacheTtlSeconds: 60, maxClientRequestsPerWindow: 10, clientRateWindowSeconds: 60,
 };
 const apps: FastifyInstance[] = [];
@@ -58,6 +59,19 @@ describe("AutoDBtwo read-only connector", () => {
     expect(image.rawPayload).toEqual(Buffer.from([1, 2, 3]));
   });
 
+  it("preserves only validated query parameters on a vehicle-scoped content resource", async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }));
+    const instance = await app(fetcher as typeof fetch);
+    const path = encodeURIComponent("/api/v1/content/carids/12/articles/9");
+    const good = await instance.inject(`/v1/content/carids/12/resource?path=${path}&sourceQuery=${encodeURIComponent("searchTerm=oil%20pump")}`);
+    expect(good.statusCode).toBe(200);
+    expect(String(fetcher.mock.calls[0][0])).toContain("searchTerm=oil%20pump");
+    const bad = await instance.inject(`/v1/content/carids/12/resource?path=${path}&sourceQuery=${encodeURIComponent("redirect=https://evil.test")}`);
+    // Query parameters cannot change the fixed upstream origin; they remain query values only.
+    expect(bad.statusCode).toBe(200);
+    expect(String(fetcher.mock.calls[1][0])).toBe("https://autoapitwo.test/api/v1/content/carids/12/articles/9?redirect=https://evil.test");
+  });
+
   it("returns sanitized upstream failures and retains upstream status only", async () => {
     const fetcher = vi.fn(async () => new Response("sensitive provider payload", { status: 503 }));
     const instance = await app(fetcher as typeof fetch);
@@ -65,6 +79,18 @@ describe("AutoDBtwo read-only connector", () => {
     expect(response.statusCode).toBe(502);
     expect(response.json().error).toMatchObject({ code: "upstream_error", upstream_status: 503, retryable: true });
     expect(response.body).not.toContain("sensitive provider payload");
+    expect(fetcher).toHaveBeenCalledTimes(config.retryAttempts);
+  });
+
+  it("retries a transient network failure and succeeds without exposing the failed attempt", async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new TypeError("socket details should not escape"))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ year: "2012" }]), { status: 200, headers: { "content-type": "application/json" } }));
+    const instance = await app(fetcher as typeof fetch);
+    const response = await instance.inject("/v1/fleet/years");
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([{ year: "2012" }]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("serves health and documents all public routes", async () => {
