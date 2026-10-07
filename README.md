@@ -1,13 +1,15 @@
-# AutoDBtwo Read-only Connector API
+# Banktwo Read-only API
 
 AutoDBtwo is a small, standalone HTTP adapter for AutoAPItwo. It exposes a
 fixed read-only API for vehicle catalog, article, and image resources, while
 keeping provider transport outside of consuming applications. It does not
 normalize or persist AutoData records and it is not a general-purpose proxy.
 
-Deploy it only on a trusted private service network or behind an authenticated
-gateway. Do not expose the connector directly to the public internet. The
-caller should be a trusted AutoData service.
+All `/v1/*` routes require a Banktwo API key in `Authorization: Bearer <key>`.
+The key is validated against the shared AutoData key database on every request.
+`/healthz`, `/readyz`, and API documentation remain public and contain no
+protected catalog or article data. Configure `API_KEYS_DATABASE_URL` as a
+server-side secret using a database role restricted to Banktwo key validation.
 
 ## Run locally
 

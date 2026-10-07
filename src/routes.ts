@@ -42,7 +42,7 @@ declare module "fastify" { interface FastifyInstance { rateLimitWindows: Map<str
 
 export function registerRoutes(app: FastifyInstance, deps: Dependencies) {
   app.decorate("rateLimitWindows", new Map<string, Window>());
-  const route = (url: string, summary: string, handler: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => app.get(url, { schema: { tags: [url.includes("content") ? "Articles and assets" : "Vehicle catalog"], summary, response: { 200: { description: "Read-only AutoAPItwo response" } } } }, handler);
+  const route = (url: string, summary: string, handler: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => app.get(url, { schema: { tags: [url.includes("content") ? "Articles and assets" : "Vehicle catalog"], summary, security: [{ BanktwoBearer: [] }], response: { 200: { description: "Read-only source response" }, 401: { description: "Missing, invalid, expired, revoked, or wrong-service API key" }, 503: { description: "Shared key store unavailable; request was rejected" } } } }, handler);
   route("/v1/fleet/years", "List available model years", (req, rep) => send(req, rep, deps, "/api/v1/fleet/years", false, 900));
   route("/v1/fleet/years/:year/makes", "List makes for a model year", (req, rep) => send(req, rep, deps, `/api/v1/fleet/years/${year((req.params as any).year)}/makes`, false, 900));
   route("/v1/fleet/years/:year/makes/:make/models", "List models for a year and make", (req, rep) => { const p = req.params as any; return send(req, rep, deps, `/api/v1/fleet/years/${year(p.year)}/makes/${segment(p.make, "make")}/models`, false, 900); });
