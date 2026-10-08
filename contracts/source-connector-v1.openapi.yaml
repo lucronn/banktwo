@@ -191,7 +191,10 @@ components:
         model: { type: string, minLength: 1, maxLength: 160 }
         configuration: { type: string, maxLength: 512 }
         region: { type: string, maxLength: 64 }
-        vin: { type: string, maxLength: 32 }
+        vin:
+          type: string
+          maxLength: 32
+          description: When supplied, candidates must match this VIN exactly; a source row without VIN data is not a match.
     VehicleCandidate:
       type: object
       required: [opaque_ref, label, confidence]
