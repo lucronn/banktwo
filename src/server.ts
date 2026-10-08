@@ -6,8 +6,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { bearerToken, createApiKeyVerifier, type ApiKeyVerifier } from "./api-keys.js";
 import { loadConfig, type Config } from "./config.js";
-import { serializeContractError, serializeError } from "./errors.js";
+import { ConnectorError, serializeContractError, serializeError } from "./errors.js";
 import { registerRoutes } from "./routes.js";
 import { registerSourceContractRoutes } from "./source-contract.js";
 import { UpstreamClient } from "./upstream-client.js";
@@ -24,7 +25,11 @@ function sourceConnectorContractPath(): string {
   return match;
 }
 
-export async function createApp(config: Config, fetcher: typeof fetch = fetch): Promise<FastifyInstance> {
+export async function createApp(
+  config: Config,
+  fetcher: typeof fetch = fetch,
+  verifyApiKey: ApiKeyVerifier = createApiKeyVerifier(config.apiKeysDatabaseUrl),
+): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, genReqId: () => randomUUID(), routerOptions: { maxParamLength: 2048 } });
   app.setErrorHandler((error, request, reply) => {
     const status = (error as { status?: number }).status || 500;
@@ -37,18 +42,39 @@ export async function createApp(config: Config, fetcher: typeof fetch = fetch): 
       info: {
         title: "Banktwo Source Connector API",
         version: "1.0.0",
-        description: "Read-only Banktwo connector for AutoData. Canonical origin: https://banktwo.cars.tk",
+        description: "Read-only Banktwo connector for AutoData. Canonical origin: https://banktwo.cars.tk. Create a Banktwo-scoped key in the AutoData key dashboard, then use Authorize in Swagger.",
       },
       servers: [{ url: "https://banktwo.cars.tk" }, { url: "/" }],
+      components: {
+        securitySchemes: {
+          BanktwoBearer: {
+            type: "http",
+            scheme: "bearer",
+            bearerFormat: "AutoData API key",
+            description: "Paste a Banktwo key from the AutoData key dashboard (starts with adk_banktwo_).",
+          },
+        },
+      },
+      security: [{ BanktwoBearer: [] }],
     },
   });
-  await app.register(swaggerUi, { routePrefix: "/docs" });
+  await app.register(swaggerUi, {
+    routePrefix: "/docs",
+    uiConfig: { persistAuthorization: true },
+  });
   app.get("/openapi.json", async () => app.swagger());
   app.get("/openapi/source-connector-v1.yaml", async (_request, reply) =>
     reply.type("application/yaml; charset=utf-8").send(readFileSync(sourceConnectorContractPath(), "utf8")),
   );
   app.get("/healthz", async () => ({ status: "ok" }));
   app.get("/readyz", async () => ({ status: "ready" }));
+  app.addHook("preHandler", async (request) => {
+    if (!request.url.split("?", 1)[0].startsWith("/v1/")) return;
+    const token = bearerToken(request.headers.authorization);
+    if (!token || !(await verifyApiKey(token, "banktwo"))) {
+      throw new ConnectorError("unauthenticated", "A valid Banktwo API key is required", 401);
+    }
+  });
   const upstream = new UpstreamClient(config, fetcher);
   registerRoutes(app, { config, upstream });
   registerSourceContractRoutes(app, { config, upstream });

@@ -16,10 +16,12 @@
   "dependencies": {
     "@fastify/swagger": "^9.8.1",
     "@fastify/swagger-ui": "^6.1.1",
-    "fastify": "^5.12.3"
+    "fastify": "^5.12.3",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "ajv": "^8.20.0",
     "tsx": "^4.23.13",
     "typescript": "^5.9.2",

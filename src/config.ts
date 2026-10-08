@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 export type Config = {
   host: string;
   port: number;
+  apiKeysDatabaseUrl?: string;
   upstreamBaseUrl: string;
   requestTimeoutMs: number;
   retryAttempts: number;
@@ -46,6 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     host: env.HOST?.trim() || "127.0.0.1",
     port: positiveInteger(env, "PORT", 3001),
+    apiKeysDatabaseUrl: env.API_KEYS_DATABASE_URL?.trim() || undefined,
     upstreamBaseUrl: upstream.origin,
     requestTimeoutMs: positiveInteger(env, "REQUEST_TIMEOUT_MS", 20_000),
     retryAttempts: positiveInteger(env, "RETRY_ATTEMPTS", 3),

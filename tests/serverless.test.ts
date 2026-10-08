@@ -32,9 +32,16 @@ it("serves OpenAPI and Swagger docs through the serverless entry point", async (
 
   const openapi = await fetch(`${base}/openapi.json`);
   expect(openapi.status).toBe(200);
-  const document = await openapi.json() as { info: { title: string }; servers?: Array<{ url: string }> };
+  const document = await openapi.json() as {
+    info: { title: string };
+    servers?: Array<{ url: string }>;
+    components?: { securitySchemes?: Record<string, unknown> };
+    security?: unknown;
+  };
   expect(document.info.title).toBe("Banktwo Source Connector API");
   expect(document.servers?.some((server) => server.url === "https://banktwo.cars.tk")).toBe(true);
+  expect(document.components?.securitySchemes?.BanktwoBearer).toBeDefined();
+  expect(document.security).toEqual([{ BanktwoBearer: [] }]);
 
   const docs = await fetch(`${base}/docs`);
   expect(docs.status).toBe(200);

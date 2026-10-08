@@ -22,7 +22,7 @@ type SchemaValidator = {
 const AjvConstructor = Ajv as unknown as new (options: Record<string, unknown>) => SchemaValidator;
 const validators = new WeakMap<FastifyInstance, SchemaValidator>();
 async function app(fetcher: typeof fetch) {
-  const instance = await createApp(config, fetcher);
+  const instance = await createApp(config, fetcher, async () => true);
   const servedContract = await instance.inject("/openapi/source-connector-v1.yaml");
   expect(servedContract.statusCode).toBe(200);
   const validator = new AjvConstructor({ strict: false, validateFormats: false, allErrors: true });
@@ -30,6 +30,14 @@ async function app(fetcher: typeof fetch) {
   validators.set(instance, validator);
   apps.push(instance);
   return instance;
+}
+async function authed(instance: FastifyInstance, options: { method?: string; url: string; payload?: unknown }) {
+  return instance.inject({
+    method: options.method ?? "GET",
+    url: options.url,
+    payload: options.payload,
+    headers: { authorization: "Bearer adk_banktwo_fixture" },
+  });
 }
 afterEach(async () => { await Promise.all(apps.splice(0).map((instance) => instance.close())); });
 const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
@@ -50,7 +58,7 @@ function expectContract(instance: FastifyInstance, schemaName: string, value: un
 describe("Banktwo Source Connector v1", () => {
   it("discovers capabilities and exposes contract operations in OpenAPI", async () => {
     const instance = await app(vi.fn() as typeof fetch);
-    const response = await instance.inject("/v1/capabilities");
+    const response = await authed(instance, { url: "/v1/capabilities" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ provider: "banktwo", capabilities: ["catalog", "vehicle_resolution", "article_list", "article_search", "resource_read"] });
     expect(response.json().request_id).toMatch(/^[a-f0-9-]{36}$/);
@@ -69,15 +77,15 @@ describe("Banktwo Source Connector v1", () => {
       return json(Array.from({ length: 101 }, (_, index) => ({ year: String(1900 + index) })));
     });
     const instance = await app(fetcher as typeof fetch);
-    const first = await instance.inject("/v1/catalog/years");
+    const first = await authed(instance, { url: "/v1/catalog/years" });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({ provider: "banktwo", scope: "years", complete: false });
     expect(first.json().items).toHaveLength(100);
     expectContract(instance, "CatalogResponse", first.json());
-    const second = await instance.inject(`/v1/catalog/years?cursor=${encodeURIComponent(first.json().next_cursor)}`);
+    const second = await authed(instance, { url: `/v1/catalog/years?cursor=${encodeURIComponent(first.json().next_cursor)}` });
     expect(second.json()).toMatchObject({ complete: true, items: [{ year: 2000, label: "2000" }] });
     expectContract(instance, "CatalogResponse", second.json());
-    const emptyCursor = await instance.inject("/v1/catalog/years?cursor=");
+    const emptyCursor = await authed(instance, { url: "/v1/catalog/years?cursor=" });
     expect(emptyCursor.statusCode).toBe(400);
     expect(emptyCursor.json().error.code).toBe("INVALID_INPUT");
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -85,10 +93,10 @@ describe("Banktwo Source Connector v1", () => {
 
   it("rejects a continuation cursor when the source catalog revision changes", async () => {
     const first = await app(vi.fn(async () => json(Array.from({ length: 101 }, (_, index) => ({ year: 1900 + index })))) as typeof fetch);
-    const page = await first.inject("/v1/catalog/years");
+    const page = await authed(first, { url: "/v1/catalog/years" });
     const cursor = page.json().next_cursor;
     const changed = await app(vi.fn(async () => json(Array.from({ length: 102 }, (_, index) => ({ year: 1900 + index })))) as typeof fetch);
-    const response = await changed.inject(`/v1/catalog/years?cursor=${encodeURIComponent(cursor)}`);
+    const response = await authed(changed, { url: `/v1/catalog/years?cursor=${encodeURIComponent(cursor)}` });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("INVALID_INPUT");
   });
@@ -101,14 +109,14 @@ describe("Banktwo Source Connector v1", () => {
       { id: "14" },
     ] }));
     const instance = await app(fetcher as typeof fetch);
-    const response = await instance.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: { year: 1999, make: "Toyota", model: "Avalon" } });
+    const response = await authed(instance, { method: "POST", url: "/v1/vehicle-resolutions", payload: { year: 1999, make: "Toyota", model: "Avalon" } });
     expect(response.statusCode).toBe(200);
     expectContract(instance, "VehicleResolutionResponse", response.json());
     expect(response.json().candidates.map((item: { opaque_ref: string }) => item.opaque_ref)).toEqual([signedRef("v", "12"), signedRef("v", "13")]);
-    expect((await instance.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: { year: 1999, make: "Toyota", model: "Avalon", unknown: "x" } })).json().error.code).toBe("INVALID_INPUT");
+    expect((await authed(instance, { method: "POST", url: "/v1/vehicle-resolutions", payload: { year: 1999, make: "Toyota", model: "Avalon", unknown: "x" } })).json().error.code).toBe("INVALID_INPUT");
     expect(fetcher).toHaveBeenCalledTimes(1);
     const constrained = await app(vi.fn(async () => json({ results: [{ id: "12", year: "1999", make: "Toyota", model: "Avalon", engine: "V6 3.0L FWD" }] })) as typeof fetch);
-    const missingVin = await constrained.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: { year: 1999, make: "Toyota", model: "Avalon", vin: "1ABC" } });
+    const missingVin = await authed(constrained, { method: "POST", url: "/v1/vehicle-resolutions", payload: { year: 1999, make: "Toyota", model: "Avalon", vin: "1ABC" } });
     expect(missingVin.json().candidates).toEqual([]);
   });
 
@@ -124,17 +132,17 @@ describe("Banktwo Source Connector v1", () => {
     });
     const instance = await app(fetcher as typeof fetch);
     const vehicle = signedRef("v", "12");
-    const listing = await instance.inject(`/v1/vehicles/${vehicle}/articles`);
+    const listing = await authed(instance, { url: `/v1/vehicles/${vehicle}/articles` });
     expect(listing.statusCode).toBe(200);
     expectContract(instance, "ArticleListResponse", listing.json());
     expect(listing.json().articles).toHaveLength(1);
-    const search = await instance.inject({ method: "POST", url: `/v1/vehicles/${vehicle}/article-search`, payload: { query: "o" } });
+    const search = await authed(instance, { method: "POST", url: `/v1/vehicles/${vehicle}/article-search`, payload: { query: "o" } });
     expect(search.statusCode).toBe(200);
     expectContract(instance, "ArticleListResponse", search.json());
     expect(search.json().articles[0].title).toBe("Article 42");
     const ref = search.json().articles[0].resource_ref;
     expect(search.json().articles[0].labor_resource_ref).toBe(ref);
-    const resource = await instance.inject(`/v1/resources/${ref}`);
+    const resource = await authed(instance, { url: `/v1/resources/${ref}` });
     expect(resource.json()).toMatchObject({ kind: "labor", media_type: "application/json" });
     expectContract(instance, "TextResource", resource.json());
     expect(resource.json().sha256).toMatch(/^[a-f0-9]{64}$/);
@@ -144,7 +152,7 @@ describe("Banktwo Source Connector v1", () => {
     expect(resource.headers["x-source-locator"]).toBe("https://source.test/api/v1/content/carids/12/components/1/itypes/2/nonstandards/42");
     expect(resource.json().asset_resource_refs).toHaveLength(1);
     const assetRef = resource.json().asset_resource_refs[0];
-    const asset = await instance.inject(`/v1/resources/${assetRef}`);
+    const asset = await authed(instance, { url: `/v1/resources/${assetRef}` });
     expect(asset.json()).toMatchObject({ kind: "asset", media_type: "image/png", content_base64: bytes.toString("base64"), sha256: createHash("sha256").update(bytes).digest("hex") });
     expectContract(instance, "BinaryResource", asset.json());
   });
@@ -153,10 +161,10 @@ describe("Banktwo Source Connector v1", () => {
     const fetcher = vi.fn(async () => new Response("secret provider payload", { headers: { "content-type": "application/json" } }));
     const instance = await app(fetcher as typeof fetch);
     const escape = `r.${Buffer.from("/api/v1/content/carids/12/../../admin").toString("base64url")}`;
-    const forbidden = await instance.inject(`/v1/resources/${escape}`);
+    const forbidden = await authed(instance, { url: `/v1/resources/${escape}` });
     expect(forbidden.statusCode).toBe(400);
     expect(fetcher).not.toHaveBeenCalled();
-    const response = await instance.inject("/v1/catalog/years");
+    const response = await authed(instance, { url: "/v1/catalog/years" });
     expect(response.statusCode).toBe(502);
     expect(response.json().error.code).toBe("INVALID_UPSTREAM_RESPONSE");
     expectContract(instance, "ErrorResponse", response.json());
@@ -169,14 +177,14 @@ describe("Banktwo Source Connector v1", () => {
       _links: { self: { href: "/api/v1/content/carids/12/articles/42?access_token=private" } },
     }] } } }));
     const instance = await app(fetcher as typeof fetch);
-    const response = await instance.inject({ method: "POST", url: `/v1/vehicles/${signedRef("v", "12")}/article-search`, payload: { query: "brake" } });
+    const response = await authed(instance, { method: "POST", url: `/v1/vehicles/${signedRef("v", "12")}/article-search`, payload: { query: "brake" } });
     expect(response.statusCode).toBe(502);
     expect(response.body).not.toContain("private");
   });
 
   it("maps an upstream rate limit to the stable retryable contract error", async () => {
     const instance = await app(vi.fn(async () => new Response("private", { status: 429, headers: { "retry-after": "1" } })) as typeof fetch);
-    const response = await instance.inject("/v1/catalog/years");
+    const response = await authed(instance, { url: "/v1/catalog/years" });
     expect(response.statusCode).toBe(429);
     expect(response.json()).toMatchObject({ error: { code: "RATE_LIMITED", retryable: true } });
     expectContract(instance, "ErrorResponse", response.json());
