@@ -5,6 +5,7 @@ RUN npm ci
 COPY tsconfig.json vitest.config.ts ./
 COPY src ./src
 COPY tests ./tests
+COPY contracts ./contracts
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine

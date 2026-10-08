@@ -86,8 +86,8 @@ describe("Banktwo Source Connector v1", () => {
       const path = new URL(String(input)).pathname;
       if (path.endsWith("/search/o")) return json({ _embedded: { data: { results: [article(42)] } } });
       if (path.includes("/search/")) return json({ _embedded: { data: { results: [] } } });
-      if (path.endsWith("/nonstandards/42")) return json({ car: { id: "12" }, _embedded: { data: { article: { image: "/api/v1/content/carids/12/images/a.png" }, partsAndLabor: { labors: { operations: [{ operation: "Replace" }] } } } } });
-      if (path.endsWith("/images/a.png")) return new Response(bytes, { headers: { "content-type": "image/png" } });
+      if (path.endsWith("/nonstandards/42")) return json({ car: { id: "12" }, _embedded: { data: { article: { image: '<mtr-image src="/api/v1/content/carids/12/thumbnails/a">' }, partsAndLabor: { labors: { operations: [{ operation: "Replace" }] } } } } });
+      if (path.endsWith("/thumbnails/a")) return new Response(bytes, { headers: { "content-type": "image/png" } });
       throw new Error(`Unexpected path: ${path}`);
     });
     const instance = await app(fetcher as typeof fetch);

@@ -150,8 +150,10 @@ function assetResourceRefs(value: unknown, carId: string, origin: string, secret
   const visit = (item: unknown, depth: number) => {
     if (depth > 12 || refs.size >= 128) return;
     if (typeof item === "string") {
-      if (/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(item)) {
-        try { refs.add(resourceRef(contentPath(item, carId, origin), secret)); } catch { /* Ignore links outside this source vehicle. */ }
+      const linkedPaths = item.match(/(?:https?:\/\/[^"'\s<>]+)?\/api\/v1\/content\/carids\/\d{1,20}\/[^"'\s<>]+/gi) || [];
+      for (const link of linkedPaths) {
+        if (!/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(link) && !/\/(?:images|graphics|thumbnails)\//i.test(link)) continue;
+        try { refs.add(resourceRef(contentPath(link, carId, origin), secret)); } catch { /* Ignore links outside this source vehicle. */ }
       }
       return;
     }
@@ -216,7 +218,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
       if (!label) return undefined;
       const carId = upstreamCarId(row);
       const opaque_ref = carId ? vehicleRef(carId, deps.config.opaqueRefSecret) : `c.${createHash("sha256").update(`${key}:${label}`).digest("hex")}`;
-      return { opaque_ref, label: label.slice(0, 512), ...(year || scope === "years" ? { year: Number(row.year || year) } : {}), ...(make || scope === "makes" ? { make: text(row.make || make) } : {}), ...(model || scope === "models" ? { model: text(row.model || model) } : {}), ...(scope === "configurations" ? { configuration: label.slice(0, 512) } : {}) };
+      return { opaque_ref, label: label.slice(0, 512), ...(year || scope === "years" ? { year: Number(row.year || year) } : {}), ...(make || scope === "makes" ? { make: text(row.make || make) } : {}), ...(model || scope === "models" ? { model: text(row.model || model) } : {}), ...(scope === "configurations" ? { configuration: label.slice(0, 512) } : {}), ...(text(row.engine) ? { engine: text(row.engine).slice(0, 256) } : {}), ...(text(row.drivetrain) ? { drivetrain: text(row.drivetrain).slice(0, 128) } : {}), ...(text(row.region) ? { region: text(row.region).slice(0, 64) } : {}) };
     }).filter((item): item is NonNullable<typeof item> => item !== undefined);
     const result = page(items, offset, key, sourceRevision);
     reply.header("x-request-id", request.id);

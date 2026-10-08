@@ -159,6 +159,9 @@ components:
         make: { type: string, maxLength: 160 }
         model: { type: string, maxLength: 160 }
         configuration: { type: string, maxLength: 512 }
+        engine: { type: string, maxLength: 256 }
+        drivetrain: { type: string, maxLength: 128 }
+        region: { type: string, maxLength: 64 }
         source_label: { type: string, maxLength: 512 }
     CatalogResponse:
       allOf:
