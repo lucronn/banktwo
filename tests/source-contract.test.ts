@@ -77,6 +77,9 @@ describe("Banktwo Source Connector v1", () => {
     const second = await instance.inject(`/v1/catalog/years?cursor=${encodeURIComponent(first.json().next_cursor)}`);
     expect(second.json()).toMatchObject({ complete: true, items: [{ year: 2000, label: "2000" }] });
     expectContract(instance, "CatalogResponse", second.json());
+    const emptyCursor = await instance.inject("/v1/catalog/years?cursor=");
+    expect(emptyCursor.statusCode).toBe(400);
+    expect(emptyCursor.json().error.code).toBe("INVALID_INPUT");
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 

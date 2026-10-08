@@ -79,7 +79,7 @@ function pathFromResourceRef(ref: unknown, secret: string): string {
   return contentPath(verifyRef(ref, "r", secret));
 }
 function cursorOffset(cursor: unknown, key: string, sourceRevision: string): number {
-  if (cursor === undefined || cursor === "") return 0;
+  if (cursor === undefined) return 0;
   const raw = text(cursor);
   if (!/^p\.[A-Za-z0-9_-]{1,510}$/.test(raw)) invalid("Invalid page cursor");
   let value: unknown;
