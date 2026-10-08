@@ -8,6 +8,7 @@ const config: Config = {
   requestTimeoutMs: 500, retryAttempts: 3, retryDelayMs: 0, retryAfterCapSeconds: 0,
   maxResponseBytes: 1024, maxCacheEntries: 8, maxCacheBytes: 4096, maxConcurrentUpstream: 2,
   cacheTtlSeconds: 60, maxClientRequestsPerWindow: 10, clientRateWindowSeconds: 60,
+  opaqueRefSecret: "test-secret-with-at-least-thirty-two-bytes",
 };
 const apps: FastifyInstance[] = [];
 async function app(fetcher: typeof fetch = fetch) { const instance = await createApp(config, fetcher); apps.push(instance); return instance; }

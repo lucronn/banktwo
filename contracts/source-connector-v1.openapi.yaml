@@ -222,6 +222,7 @@ components:
         component: { type: string, maxLength: 256 }
         labor_resource_ref: { type: string, maxLength: 2048 }
         resource_ref: { type: string, maxLength: 2048 }
+        asset_resource_refs: { type: array, maxItems: 128, items: { type: string, maxLength: 2048 } }
     ArticleListResponse:
       allOf:
         - { $ref: '#/components/schemas/SourceEnvelope' }
@@ -254,6 +255,7 @@ components:
             media_type: { type: string, maxLength: 128 }
             content: { type: string, maxLength: 10000000 }
             sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+            asset_resource_refs: { type: array, maxItems: 128, items: { type: string, maxLength: 2048 } }
     BinaryResource:
       allOf:
         - { $ref: '#/components/schemas/SourceEnvelope' }

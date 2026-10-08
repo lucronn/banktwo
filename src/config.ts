@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 export type Config = {
   host: string;
   port: number;
@@ -13,6 +15,7 @@ export type Config = {
   cacheTtlSeconds: number;
   maxClientRequestsPerWindow: number;
   clientRateWindowSeconds: number;
+  opaqueRefSecret: string;
 };
 
 function positiveInteger(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
@@ -37,6 +40,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (upstream.protocol !== "https:" || upstream.username || upstream.password || upstream.pathname !== "/" || upstream.search || upstream.hash) {
     throw new Error("UPSTREAM_BASE_URL must be an HTTPS origin without credentials or a path");
   }
+  const opaqueRefSecret = env.OPAQUE_REF_SECRET?.trim();
+  if (opaqueRefSecret && Buffer.byteLength(opaqueRefSecret) < 32) throw new Error("OPAQUE_REF_SECRET must contain at least 32 bytes");
+  if (!opaqueRefSecret && env.NODE_ENV === "production") throw new Error("OPAQUE_REF_SECRET is required in production");
   return {
     host: env.HOST?.trim() || "127.0.0.1",
     port: positiveInteger(env, "PORT", 3001),
@@ -52,5 +58,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheTtlSeconds: positiveInteger(env, "CACHE_TTL_SECONDS", 300),
     maxClientRequestsPerWindow: positiveInteger(env, "MAX_CLIENT_REQUESTS_PER_WINDOW", 120),
     clientRateWindowSeconds: positiveInteger(env, "CLIENT_RATE_WINDOW_SECONDS", 60),
+    opaqueRefSecret: opaqueRefSecret || randomBytes(32).toString("hex"),
   };
 }

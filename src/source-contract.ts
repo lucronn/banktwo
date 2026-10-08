@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "./config.js";
 import { ConnectorError } from "./errors.js";
@@ -8,7 +8,7 @@ import { UpstreamClient, type UpstreamResponse } from "./upstream-client.js";
 type Dependencies = { config: Config; upstream: UpstreamClient };
 type RecordValue = Record<string, unknown>;
 type Selector = { year: number; make: string; model: string; configuration?: string; region?: string; vin?: string };
-type Article = { opaque_ref: string; title: string; category?: string; component?: string; resource_ref: string; labor_resource_ref?: string };
+type Article = { opaque_ref: string; title: string; category?: string; component?: string; resource_ref: string; labor_resource_ref?: string; asset_resource_refs?: string[] };
 const revision = "autoapitwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
 const pageSize = 100;
@@ -30,11 +30,25 @@ function sourceJson(result: UpstreamResponse): unknown {
   catch { return malformed(); }
 }
 function encoded(value: string): string { return encodeURIComponent(value); }
-function vehicleRef(carId: string): string { return `v.${carId}`; }
-function carIdFromRef(value: unknown): string {
-  const ref = text(value);
-  if (!/^v\.\d{1,20}$/.test(ref)) invalid("Invalid vehicle reference");
-  return ref.slice(2);
+function signRef(prefix: string, payload: string, secret: string): string {
+  const encodedPayload = Buffer.from(payload, "utf8").toString("base64url");
+  const signature = createHmac("sha256", secret).update(`banktwo-${prefix}-ref-v1\\0`).update(encodedPayload).digest("base64url");
+  return `${prefix}.${encodedPayload}.${signature}`;
+}
+function verifyRef(value: unknown, prefix: string, secret: string): string {
+  const match = new RegExp(`^${prefix}\\.([A-Za-z0-9_-]{1,1870})\\.([A-Za-z0-9_-]{43})$`).exec(text(value));
+  if (!match) invalid("Invalid source reference");
+  const expected = createHmac("sha256", secret).update(`banktwo-${prefix}-ref-v1\\0`).update(match[1]).digest();
+  const supplied = Buffer.from(match[2], "base64url");
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) invalid("Invalid source reference");
+  try { return Buffer.from(match[1], "base64url").toString("utf8"); }
+  catch { return invalid("Invalid source reference"); }
+}
+function vehicleRef(carId: string, secret: string): string { return signRef("v", carId, secret); }
+function carIdFromRef(value: unknown, secret: string): string {
+  const carId = verifyRef(value, "v", secret);
+  if (!/^\d{1,20}$/.test(carId)) invalid("Invalid vehicle reference");
+  return carId;
 }
 function cleanSegment(value: unknown, name: string, maxLength = 160): string {
   const part = text(value);
@@ -50,28 +64,21 @@ function contentPath(value: string, carId?: string, upstreamOrigin = "https://ba
   let path: string;
   try {
     const parsed = new URL(value, upstreamOrigin);
-    if (parsed.origin !== upstreamOrigin || parsed.hash || parsed.search.length > 1024 || [...parsed.searchParams].some(([key, item]) => !/^[A-Za-z0-9_.~-]{1,64}$/.test(key) || item.length > 512 || /[\u0000-\u001f]/.test(item))) invalid("Invalid resource reference");
+    if (parsed.origin !== upstreamOrigin || parsed.hash || parsed.search) invalid("Resource query parameters are not supported");
     path = parsed.pathname;
-    if (parsed.search) path += parsed.search;
   } catch { return invalid("Invalid resource reference"); }
   const pathname = path.split("?", 1)[0];
   const match = /^\/api\/v1\/content\/carids\/(\d{1,20})\/(.+)$/.exec(pathname);
   if (!match || path.length > 1400 || (carId && match[1] !== carId) || /%2f|%5c|%2e/i.test(pathname) || pathname.includes("\\") || pathname.split("/").some((part) => part === "." || part === "..")) invalid("Resource is outside the selected vehicle");
   return path;
 }
-function resourceRef(path: string): string {
-  return `r.${Buffer.from(contentPath(path), "utf8").toString("base64url")}`;
+function resourceRef(path: string, secret: string): string {
+  return signRef("r", contentPath(path), secret);
 }
-function pathFromResourceRef(ref: unknown): string {
-  const value = text(ref);
-  if (!/^r\.[A-Za-z0-9_-]{1,2000}$/.test(value)) invalid("Invalid resource reference");
-  let decoded: string;
-  try { decoded = Buffer.from(value.slice(2), "base64url").toString("utf8"); }
-  catch { return invalid("Invalid resource reference"); }
-  if (resourceRef(decoded) !== value) invalid("Invalid resource reference");
-  return decoded;
+function pathFromResourceRef(ref: unknown, secret: string): string {
+  return contentPath(verifyRef(ref, "r", secret));
 }
-function cursorOffset(cursor: unknown, key: string): number {
+function cursorOffset(cursor: unknown, key: string, sourceRevision: string): number {
   if (cursor === undefined || cursor === "") return 0;
   const raw = text(cursor);
   if (!/^p\.[A-Za-z0-9_-]{1,510}$/.test(raw)) invalid("Invalid page cursor");
@@ -79,15 +86,15 @@ function cursorOffset(cursor: unknown, key: string): number {
   try { value = JSON.parse(Buffer.from(raw.slice(2), "base64url").toString("utf8")); }
   catch { return invalid("Invalid page cursor"); }
   const parsed = object(value);
-  if (parsed?.key !== cursorKey(key) || !Number.isSafeInteger(parsed.offset) || Number(parsed.offset) < 0 || Number(parsed.offset) > 100_000) invalid("Invalid page cursor");
+  if (parsed?.key !== cursorKey(key) || parsed.revision !== sourceRevision || !Number.isSafeInteger(parsed.offset) || Number(parsed.offset) < 0 || Number(parsed.offset) > 100_000) invalid("Invalid page cursor");
   return Number(parsed.offset);
 }
 function cursorKey(key: string): string { return createHash("sha256").update(key).digest("hex"); }
-function nextCursor(key: string, offset: number): string { return `p.${Buffer.from(JSON.stringify({ key: cursorKey(key), offset })).toString("base64url")}`; }
-function page<T>(items: T[], offset: number, key: string) {
+function nextCursor(key: string, offset: number, sourceRevision: string): string { return `p.${Buffer.from(JSON.stringify({ key: cursorKey(key), offset, revision: sourceRevision })).toString("base64url")}`; }
+function page<T>(items: T[], offset: number, key: string, sourceRevision: string) {
   const slice = items.slice(offset, offset + pageSize);
   const complete = offset + slice.length >= items.length;
-  return { complete, ...(complete ? {} : { next_cursor: nextCursor(key, offset + slice.length) }), items: slice };
+  return { complete, ...(complete ? {} : { next_cursor: nextCursor(key, offset + slice.length, sourceRevision) }), items: slice };
 }
 function envelope(request: FastifyRequest, result?: UpstreamResponse) {
   return { request_id: request.id, provider: "banktwo" as const, source_revision: result?.sha256 || revision, fetched_at: new Date().toISOString(), ...(result ? { source_locator: result.sourceUri } : {}) };
@@ -104,21 +111,26 @@ function upstreamCarId(row: RecordValue): string | undefined {
   const value = text(row.id || row.carId || embedded?.carId || match?.[1]);
   return /^\d{1,20}$/.test(value) ? value : undefined;
 }
-function candidate(row: RecordValue, selector: Selector) {
+function candidate(row: RecordValue, selector: Selector, secret: string) {
   const carId = upstreamCarId(row);
   if (!carId) return undefined;
   const year = Number(row.year);
   const make = text(row.make);
   const model = text(row.model);
-  if (year && year !== selector.year) return undefined;
-  if (make && make.toLocaleLowerCase() !== selector.make.toLocaleLowerCase()) return undefined;
-  if (model && model.toLocaleLowerCase() !== selector.model.toLocaleLowerCase()) return undefined;
+  if (!Number.isInteger(year) || year !== selector.year || !make || !model) return undefined;
+  if (make.toLocaleLowerCase() !== selector.make.toLocaleLowerCase()) return undefined;
+  if (model.toLocaleLowerCase() !== selector.model.toLocaleLowerCase()) return undefined;
   const configuration = text(row.engine || row.configuration || row.description);
+  if (selector.configuration && (!configuration || !configuration.toLocaleLowerCase().includes(selector.configuration.toLocaleLowerCase()))) return undefined;
+  const region = text(row.region || row.market);
+  if (selector.region && (!region || region.toLocaleLowerCase() !== selector.region.toLocaleLowerCase())) return undefined;
+  const vin = text(row.vin || row.VIN);
+  if (selector.vin && (!vin || vin.toLocaleLowerCase() !== selector.vin.toLocaleLowerCase())) return undefined;
   const label = `${selector.year} ${make || selector.make} ${model || selector.model}${configuration ? ` ${configuration}` : ""}`.slice(0, 512);
   const configurationMatch = !!selector.configuration && configuration.toLocaleLowerCase().includes(selector.configuration.toLocaleLowerCase());
-  return { opaque_ref: vehicleRef(carId), label, confidence: configurationMatch ? 1 : 0.8, evidence: ["year, make, and model matched source catalog", ...(configurationMatch ? ["configuration matched"] : [])] };
+  return { opaque_ref: vehicleRef(carId, secret), label, confidence: configurationMatch ? 1 : 0.8, evidence: ["year, make, and model matched source catalog", ...(configurationMatch ? ["configuration matched"] : [])] };
 }
-function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string): Article | undefined {
+function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string, secret: string): Article | undefined {
   const link = object(object(row._links)?.self);
   const href = text(link?.href);
   if (!href) return undefined;
@@ -128,10 +140,27 @@ function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string)
   const display = text(row.display);
   const title = (text(row.title || row.name) || display.split(">>").at(-1)?.trim() || "").slice(0, 1000);
   if (!title) return undefined;
-  const ref = resourceRef(path);
+  const ref = resourceRef(path, secret);
   const category = text(object(row.itypeCategory)?.name).slice(0, 256);
   const component = display.includes(">>") ? display.split(">>")[0].trim().slice(0, 256) : "";
   return { opaque_ref: ref, title, ...(category ? { category } : {}), ...(component ? { component } : {}), resource_ref: ref, ...(category.toLowerCase().includes("labor") ? { labor_resource_ref: ref } : {}) };
+}
+function assetResourceRefs(value: unknown, carId: string, origin: string, secret: string): string[] {
+  const refs = new Set<string>();
+  const visit = (item: unknown, depth: number) => {
+    if (depth > 12 || refs.size >= 128) return;
+    if (typeof item === "string") {
+      if (/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(item)) {
+        try { refs.add(resourceRef(contentPath(item, carId, origin), secret)); } catch { /* Ignore links outside this source vehicle. */ }
+      }
+      return;
+    }
+    if (Array.isArray(item)) { for (const child of item) visit(child, depth + 1); return; }
+    const record = object(item);
+    if (record) for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  visit(value, 0);
+  return [...refs];
 }
 function searchRows(data: unknown): RecordValue[] {
   const root = object(data);
@@ -179,16 +208,17 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
       : scope === "configurations" ? `/api/v1/fleet/years/${year}/makes/${encoded(make!)}/models/${encoded(model!)}/engines`
       : invalid("Unsupported catalog scope");
     const key = `${scope}:${year || ""}:${make || ""}:${model || ""}`;
-    const offset = cursorOffset(query.cursor, key);
     const { data, source } = await readJson(deps, path, 900);
+    const sourceRevision = source.sha256;
+    const offset = cursorOffset(query.cursor, key, sourceRevision);
     const items = list(data).map((row) => {
       const label = text(row.year || row.make || row.model || row.engine);
       if (!label) return undefined;
       const carId = upstreamCarId(row);
-      const opaque_ref = carId ? vehicleRef(carId) : `c.${createHash("sha256").update(`${key}:${label}`).digest("hex")}`;
+      const opaque_ref = carId ? vehicleRef(carId, deps.config.opaqueRefSecret) : `c.${createHash("sha256").update(`${key}:${label}`).digest("hex")}`;
       return { opaque_ref, label: label.slice(0, 512), ...(year || scope === "years" ? { year: Number(row.year || year) } : {}), ...(make || scope === "makes" ? { make: text(row.make || make) } : {}), ...(model || scope === "models" ? { model: text(row.model || model) } : {}), ...(scope === "configurations" ? { configuration: label.slice(0, 512) } : {}) };
     }).filter((item): item is NonNullable<typeof item> => item !== undefined);
-    const result = page(items, offset, key);
+    const result = page(items, offset, key, sourceRevision);
     reply.header("x-request-id", request.id);
     return { ...envelope(request, source), scope, complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), items: result.items };
   });
@@ -197,43 +227,43 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const selector = parseSelector(request.body);
     const query = `${selector.year} ${selector.make} ${selector.model}`;
     const { data, source } = await readJson(deps, `/api/v1/fleet/search/${encoded(query)}`, 900);
-    const candidates = [...new Map(list(data).map((row) => candidate(row, selector)).filter((item): item is NonNullable<typeof item> => item !== undefined).map((item) => [item.opaque_ref, item])).values()];
+    const candidates = [...new Map(list(data).map((row) => candidate(row, selector, deps.config.opaqueRefSecret)).filter((item): item is NonNullable<typeof item> => item !== undefined).map((item) => [item.opaque_ref, item])).values()];
     if (candidates.length > 100) throw new ConnectorError("upstream_response_too_large", "Vehicle resolution exceeds candidate limit", 502);
     reply.header("x-request-id", request.id);
     return { ...envelope(request, source), selector, candidates };
   });
   app.get("/v1/vehicles/:opaqueRef/articles", schema("List all source article headings for a vehicle"), async (request, reply) => {
     guard(request, reply);
-    const carId = carIdFromRef((request.params as RecordValue).opaqueRef);
+    const carId = carIdFromRef((request.params as RecordValue).opaqueRef, deps.config.opaqueRefSecret);
     const query = asQuery(request);
     onlyKeys(query, ["cursor"]);
     const key = `articles:${carId}`;
-    const offset = cursorOffset(query.cursor, key);
     const results = await Promise.all([...indexTerms].map((term) => readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, 86_400)));
-    const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl)).filter((item): item is Article => item !== undefined)));
-    const result = page(articles, offset, key);
+    const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined)));
     const digest = createHash("sha256").update(results.map((item) => item.source.sha256).join(":"), "utf8").digest("hex");
+    const offset = cursorOffset(query.cursor, key, digest);
+    const result = page(articles, offset, key, digest);
     reply.header("x-request-id", request.id);
     return { ...envelope(request), source_revision: digest, complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), articles: result.items };
   });
   app.post("/v1/vehicles/:opaqueRef/article-search", schema("Search vehicle article headings"), async (request, reply) => {
     guard(request, reply);
-    const carId = carIdFromRef((request.params as RecordValue).opaqueRef);
+    const carId = carIdFromRef((request.params as RecordValue).opaqueRef, deps.config.opaqueRefSecret);
     const body = object(request.body);
     if (!body) invalid("Invalid article search body");
     onlyKeys(body, ["query", "cursor"]);
     const term = cleanSegment(body.query, "query", 512);
     const key = `search:${carId}:${term}`;
-    const offset = cursorOffset(body.cursor, key);
     const { data, source } = await readJson(deps, `/api/v1/content/carids/${carId}/search/${encoded(term)}`, 86_400);
-    const articles = boundedArticles(searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl)).filter((item): item is Article => item !== undefined));
-    const result = page(articles, offset, key);
+    const articles = boundedArticles(searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined));
+    const offset = cursorOffset(body.cursor, key, source.sha256);
+    const result = page(articles, offset, key, source.sha256);
     reply.header("x-request-id", request.id);
     return { ...envelope(request, source), complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), articles: result.items };
   });
   app.get("/v1/resources/:opaqueRef", schema("Read a selected text or binary resource"), async (request, reply) => {
     guard(request, reply);
-    const path = pathFromResourceRef((request.params as RecordValue).opaqueRef);
+    const path = pathFromResourceRef((request.params as RecordValue).opaqueRef, deps.config.opaqueRefSecret);
     const source = await deps.upstream.read(path, "application/json,image/*,application/octet-stream", 3600);
     const media_type = source.contentType.split(";")[0].trim().toLowerCase();
     if (!media_type || media_type.length > 128) return malformed();
@@ -259,7 +289,8 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
       const embedded = object(object(object(value)?._embedded)?.data);
       if (!object(embedded?.article) && !object(embedded?.partsAndLabor)) return malformed();
       const kind = object(embedded?.partsAndLabor) ? "labor" : "article";
-      return { ...provenance, kind, media_type, content, sha256: source.sha256 };
+      const assets = assetResourceRefs(value, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret);
+      return { ...provenance, kind, media_type, content, sha256: source.sha256, ...(assets.length ? { asset_resource_refs: assets } : {}) };
     }
     return { ...provenance, kind: "text", media_type, content, sha256: source.sha256 };
   });

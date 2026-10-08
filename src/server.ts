@@ -1,5 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import type { Config } from "./config.js";
@@ -18,6 +20,7 @@ export async function createApp(config: Config, fetcher: typeof fetch = fetch): 
   await app.register(swagger, { openapi: { openapi: "3.0.3", info: { title: "Banktwo Source Connector API", version: "1.0.0" } } });
   await app.register(swaggerUi, { routePrefix: "/docs" });
   app.get("/openapi.json", async () => app.swagger());
+  app.get("/openapi/source-connector-v1.yaml", async (_request, reply) => reply.type("application/yaml; charset=utf-8").send(readFileSync(join(process.cwd(), "contracts/source-connector-v1.openapi.yaml"), "utf8")));
   app.get("/healthz", async () => ({ status: "ok" }));
   app.get("/readyz", async () => ({ status: "ready" }));
   const upstream = new UpstreamClient(config, fetcher);
