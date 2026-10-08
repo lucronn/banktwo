@@ -86,16 +86,19 @@ export class UpstreamClient {
     try {
       response = await this.fetcher(url, { method: "GET", headers: { accept }, redirect: "manual", signal: AbortSignal.timeout(this.config.requestTimeoutMs) });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "TimeoutError") throw new ConnectorError("upstream_timeout", "AutoAPItwo request timed out", 504);
-      throw new ConnectorError("upstream_error", "AutoAPItwo could not be reached", 502);
+      if (error instanceof DOMException && error.name === "TimeoutError") throw new ConnectorError("upstream_timeout", "Banktwo upstream request timed out", 504);
+      throw new ConnectorError("upstream_error", "Banktwo upstream could not be reached", 502);
     }
-    if (response.status >= 300 && response.status < 400) throw new ConnectorError("upstream_error", "AutoAPItwo returned an unexpected redirect", 502, response.status);
+    if (response.status >= 300 && response.status < 400) throw new ConnectorError("upstream_error", "Banktwo upstream returned an unexpected redirect", 502, response.status);
     if (!response.ok) {
       const retryAfter = Number(response.headers.get("retry-after"));
-      throw new ConnectorError("upstream_error", "AutoAPItwo request failed", 502, response.status, Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : undefined);
+      if (response.status === 404) throw new ConnectorError("not_found", "Banktwo source resource was not found", 404, response.status);
+      if (response.status === 401 || response.status === 403) throw new ConnectorError("unauthorized", "Banktwo source access was denied", 401, response.status);
+      if (response.status === 429) throw new ConnectorError("rate_limited", "Banktwo source rate limit was reached", 429, response.status, Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : undefined);
+      throw new ConnectorError("upstream_error", "Banktwo upstream request failed", 502, response.status, Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : undefined);
     }
     const reader = response.body?.getReader();
-    if (!reader) throw new ConnectorError("upstream_error", "AutoAPItwo returned an empty response", 502, response.status);
+    if (!reader) throw new ConnectorError("upstream_error", "Banktwo upstream returned an empty response", 502, response.status);
     const chunks: Uint8Array[] = [];
     let size = 0;
     try {
@@ -105,7 +108,7 @@ export class UpstreamClient {
         size += value.byteLength;
         if (size > this.config.maxResponseBytes) {
           await reader.cancel();
-          throw new ConnectorError("upstream_response_too_large", "AutoAPItwo response exceeded the configured size limit", 502, response.status);
+          throw new ConnectorError("upstream_response_too_large", "Banktwo upstream response exceeded the configured size limit", 502, response.status);
         }
         chunks.push(value);
       }

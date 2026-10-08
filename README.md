@@ -1,63 +1,65 @@
-# AutoDBtwo Read-only Connector API
+# Banktwo
 
-AutoDBtwo is a small, standalone HTTP adapter for AutoAPItwo. It exposes a
-fixed read-only API for vehicle catalog, article, and image resources, while
-keeping provider transport outside of consuming applications. It does not
-normalize or persist AutoData records and it is not a general-purpose proxy.
+Banktwo is an independent read-only source connector. It owns the upstream
+vehicle catalog, article search, resource validation, retry, cache, and rate
+limits. AutoData calls its provider-neutral Source Connector v1 API over HTTP;
+Banktwo does not need AutoData code, database access, or Bankone routes.
 
-Deploy it only on a trusted private service network or behind an authenticated
-gateway. Do not expose the connector directly to the public internet. The
-caller should be a trusted AutoData service.
+The intended direct service origin is `https://banktwo.cars.tk`. A deployment
+serves `/v1` at the origin root, plus `/healthz` and `/readyz`; it does not
+require `MOUNT_PATH=/banktwo` or a shared-path gateway. Domain attachment and
+production traffic changes are separate deployment operations.
 
-## Run locally
+## Run
 
-Requires Node.js 22 or newer.
+Node.js 22 or newer is required.
 
 ```sh
-npm install
+npm ci
 cp .env.example .env
 npm run dev
 ```
 
-The service binds to `127.0.0.1:3001` by default. Set `HOST=0.0.0.0` inside a
-container. The upstream defaults to `https://autoapitwo.vercel.app` and can be
-overridden with `UPSTREAM_BASE_URL`, which must be an HTTPS origin.
+The local listener defaults to `127.0.0.1:3001`. Set `HOST=0.0.0.0` in a
+container. `UPSTREAM_BASE_URL` is the fixed HTTPS origin for the Banktwo source
+and defaults to `https://autoapitwo.vercel.app`; caller input cannot change it.
+The Dockerfile builds and runs this repository alone.
 
-## API
+## Source Connector v1
 
-- `GET /v1/fleet/years`
-- `GET /v1/fleet/years/{year}/makes`
-- `GET /v1/fleet/years/{year}/makes/{make}/models`
-- `GET /v1/fleet/years/{year}/makes/{make}/models/{model}/engines`
-- `GET /v1/fleet/carids/{carId}`
-- `GET /v1/fleet/search/{query}`
-- `GET /v1/fleet/resource?path={encodedAllowlistedFleetPath}` for the bounded
-  fleet traversal path used by the ingestion worker.
-- `GET /v1/content/carids/{carId}/search/{term}`
-- `GET /v1/content/carids/{carId}/resource?path={encodedProviderPath}` for a
-  resource path under that same vehicle's AutoAPItwo content namespace; add
-  `sourceQuery={encodedQuery}` when returned by the provider and `binary=true`
-  for image/binary resources.
-- `GET /healthz`, `GET /readyz`
+- `GET /v1/capabilities`
+- `GET /v1/catalog/{years|makes|models|configurations}` with scoped selector
+  query parameters and continuation cursors
+- `POST /v1/vehicle-resolutions`
+- `GET /v1/vehicles/{opaqueRef}/articles`
+- `POST /v1/vehicles/{opaqueRef}/article-search`
+- `GET /v1/resources/{opaqueRef}`
 
-OpenAPI JSON is at `/openapi.json`, with Swagger UI at `/docs`. Successful
-upstream responses include `X-Source-Uri` and `X-Content-SHA256` for provenance.
-Errors use a sanitized JSON envelope and never include upstream response bodies.
+The v1 API returns `provider: banktwo`, a request ID, source revision, fetch
+time, source locator, explicit page completion, and opaque references. It
+returns all matching vehicle candidates without silently selecting one.
+Resources include SHA-256 and either original source text or base64 binary
+bytes. Provider paths stay inside Banktwo and are never used to choose an
+arbitrary upstream origin.
 
-## Limits and safety
+The previous `/v1/fleet/*` and `/v1/content/*` endpoints remain temporarily for
+existing callers during cutover. New integrations should use the Source
+Connector operations. OpenAPI JSON is at `/openapi.json`, with Swagger UI at
+`/docs`.
 
-- HTTPS-only configured upstream origin; redirects are rejected.
-- Only fixed fleet routes and paths scoped under the requested vehicle's
-  content resource are accepted.
-- GET-only methods, bounded timeout and response size, bounded in-memory cache,
-  bounded concurrent upstream reads, request coalescing, and per-client rate
-  limits.
-- Caller input cannot select an upstream origin or cross vehicle content IDs.
+## Operational limits
+
+The transport uses GET only, a fixed HTTPS origin, no redirects, a bounded
+response size and timeout, bounded concurrency and cache, and a client rate
+limit. A partial article-index traversal fails rather than returning an
+apparently complete list. All v1 errors use stable error codes and omit
+upstream response bodies.
 
 ## Verify
 
 ```sh
+npm ci
 npm test
-npm run build
 npm run lint
+npm run build
 ```

@@ -1,4 +1,4 @@
-name: Publish AutoDBtwo container
+name: Publish Banktwo container
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/lucronn/autodbtwo
+          images: ghcr.io/lucronn/banktwo
           tags: |
             type=raw,value=dev
             type=sha
