@@ -143,11 +143,12 @@ components:
       required: [complete]
       oneOf:
         - properties: { complete: { const: true } }
+          not: { required: [next_cursor] }
         - required: [next_cursor]
           properties: { complete: { const: false }, next_cursor: { type: string, maxLength: 512 } }
       properties:
         complete: { type: boolean }
-        next_cursor: { type: string, maxLength: 512 }
+        next_cursor: { type: string, minLength: 1, maxLength: 512 }
     CatalogItem:
       type: object
       required: [opaque_ref, label]
@@ -291,9 +292,12 @@ components:
             retryable: { type: boolean }
             details:
               type: object
-              additionalProperties: true
-              propertyNames:
-                pattern: '^(?!(authorization|cookie|password|secret|token|database|db_id)$)[A-Za-z0-9_.-]+$'
+              maxProperties: 8
+              additionalProperties: false
+              properties:
+                candidate_count: { type: integer, minimum: 0 }
+                field: { type: string, minLength: 1, maxLength: 128 }
+                scope: { type: string, enum: [years, makes, models, configurations, articles, resources] }
     CapabilitiesResponse:
       allOf:
         - { $ref: '#/components/schemas/SourceEnvelope' }
