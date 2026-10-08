@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { createHash, createHmac } from "node:crypto";
 import Ajv from "ajv";
 import { parse } from "yaml";
@@ -31,8 +31,11 @@ async function app(fetcher: typeof fetch) {
   apps.push(instance);
   return instance;
 }
-async function authed(instance: FastifyInstance, options: { method?: string; url: string; payload?: unknown }) {
-  return instance.inject({
+async function authed(
+  instance: FastifyInstance,
+  options: { method?: "GET" | "POST"; url: string; payload?: string | object | Buffer },
+): Promise<LightMyRequestResponse> {
+  return await instance.inject({
     method: options.method ?? "GET",
     url: options.url,
     payload: options.payload,
