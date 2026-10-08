@@ -136,7 +136,7 @@ function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string,
   if (!href) return undefined;
   let path: string;
   try { path = contentPath(href, carId, upstreamOrigin); }
-  catch { return undefined; }
+  catch { return malformed(); }
   const display = text(row.display);
   const title = (text(row.title || row.name) || display.split(">>").at(-1)?.trim() || "").slice(0, 1000);
   if (!title) return undefined;

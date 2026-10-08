@@ -126,6 +126,17 @@ describe("Banktwo Source Connector v1", () => {
     expect(response.body).not.toContain("secret provider payload");
   });
 
+  it("fails closed on article links containing signed or credential query strings", async () => {
+    const fetcher = vi.fn(async () => json({ _embedded: { data: { results: [{
+      display: "Engine >> Article",
+      _links: { self: { href: "/api/v1/content/carids/12/articles/42?access_token=private" } },
+    }] } } }));
+    const instance = await app(fetcher as typeof fetch);
+    const response = await instance.inject({ method: "POST", url: `/v1/vehicles/${signedRef("v", "12")}/article-search`, payload: { query: "brake" } });
+    expect(response.statusCode).toBe(502);
+    expect(response.body).not.toContain("private");
+  });
+
   it("maps an upstream rate limit to the stable retryable contract error", async () => {
     const instance = await app(vi.fn(async () => new Response("private", { status: 429, headers: { "retry-after": "1" } })) as typeof fetch);
     const response = await instance.inject("/v1/catalog/years");
