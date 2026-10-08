@@ -4,8 +4,7 @@ info:
   version: 1.0.0
   description: Provider-neutral read-only contract implemented independently by Bankone and Banktwo.
 servers:
-  - url: https://bankone.cars.tk
-  - url: https://banktwo.cars.tk
+  - url: /
 paths:
   /v1/capabilities:
     get:
