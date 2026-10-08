@@ -1,7 +1,8 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
 import Fastify, { type FastifyInstance } from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
-import type { Config } from "./config.js";
+import { loadConfig, type Config } from "./config.js";
 import { ConnectorError, serializeError } from "./errors.js";
 import { registerRoutes } from "./routes.js";
 import { UpstreamClient } from "./upstream-client.js";
@@ -28,4 +29,16 @@ export async function createApp(config: Config, fetcher: typeof fetch = fetch, v
   registerRoutes(app, { config, upstream: new UpstreamClient(config, fetcher) });
   await app.ready();
   return app;
+}
+
+let serverlessAppPromise: Promise<FastifyInstance> | undefined;
+
+function getServerlessApp(): Promise<FastifyInstance> {
+  if (!serverlessAppPromise) serverlessAppPromise = createApp(loadConfig());
+  return serverlessAppPromise;
+}
+
+export default async function handler(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const app = await getServerlessApp();
+  app.server.emit("request", request, response);
 }
