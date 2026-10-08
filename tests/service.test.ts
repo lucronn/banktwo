@@ -8,12 +8,13 @@ const config: Config = {
   requestTimeoutMs: 500, retryAttempts: 3, retryDelayMs: 0, retryAfterCapSeconds: 0,
   maxResponseBytes: 1024, maxCacheEntries: 8, maxCacheBytes: 4096, maxConcurrentUpstream: 2,
   cacheTtlSeconds: 60, maxClientRequestsPerWindow: 10, clientRateWindowSeconds: 60,
+  opaqueRefSecret: "test-secret-with-at-least-thirty-two-bytes",
 };
 const apps: FastifyInstance[] = [];
 async function app(fetcher: typeof fetch = fetch) { const instance = await createApp(config, fetcher); apps.push(instance); return instance; }
 afterEach(async () => { await Promise.all(apps.splice(0).map((instance) => instance.close())); });
 
-describe("AutoDBtwo read-only connector", () => {
+describe("Banktwo read-only connector", () => {
   it("serves fleet resources through the fixed upstream origin and reuses its bounded cache", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify([{ year: "2012" }]), { status: 200, headers: { "content-type": "application/json" } }));
     const instance = await app(fetcher as typeof fetch);
@@ -98,7 +99,7 @@ describe("AutoDBtwo read-only connector", () => {
     expect((await instance.inject("/healthz")).json()).toEqual({ status: "ok" });
     expect((await instance.inject("/readyz")).json()).toEqual({ status: "ready" });
     const document = (await instance.inject("/openapi.json")).json();
-    expect(document.info.title).toBe("AutoDBtwo Read-only Connector API");
+    expect(document.info.title).toBe("Banktwo Source Connector API");
     expect(document.paths["/v1/fleet/years"]).toBeDefined();
     expect(document.paths["/v1/content/carids/{carId}/resource"]).toBeDefined();
   });

@@ -1,4 +1,4 @@
-name: Verify AutoDBtwo
+name: Verify Banktwo
 
 on:
   push:
@@ -19,5 +19,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run lint
       - run: npm run build
       - run: npm audit --omit=dev

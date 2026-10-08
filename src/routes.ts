@@ -9,7 +9,7 @@ const year = (value: unknown) => { const text = String(value ?? ""); if (!/^\d{4
 const id = (value: unknown, name: string) => { const text = String(value ?? ""); if (!/^\d{1,20}$/.test(text)) throw new ConnectorError("invalid_request", `${name} must be numeric`, 400); return text; };
 const segment = (value: unknown, name: string) => { const text = String(value ?? "").trim(); if (!text || text.length > 256 || /[\u0000-\u001f]/.test(text)) throw new ConnectorError("invalid_request", `${name} is invalid`, 400); return encodeURIComponent(text); };
 
-function rateLimit(request: FastifyRequest, config: Config, windows: Map<string, Window>, reply: FastifyReply) {
+export function rateLimit(request: FastifyRequest, config: Config, windows: Map<string, Window>, reply: FastifyReply) {
   const key = request.ip || "unknown";
   const now = Date.now();
   if (windows.size > 4096) {
@@ -34,7 +34,7 @@ async function send(request: FastifyRequest, reply: FastifyReply, deps: Dependen
   reply.header("x-source-uri", result.sourceUri).header("x-content-sha256", result.sha256).header("cache-control", "no-store");
   if (binary) return reply.type(result.contentType).send(result.body);
   try { JSON.parse(result.body.toString("utf8")); }
-  catch { throw new ConnectorError("upstream_error", "AutoAPItwo returned invalid JSON", 502, result.status); }
+  catch { throw new ConnectorError("upstream_error", "Banktwo upstream returned invalid JSON", 502, result.status); }
   return reply.type(result.contentType || "application/json; charset=utf-8").send(result.body);
 }
 
@@ -42,13 +42,13 @@ declare module "fastify" { interface FastifyInstance { rateLimitWindows: Map<str
 
 export function registerRoutes(app: FastifyInstance, deps: Dependencies) {
   app.decorate("rateLimitWindows", new Map<string, Window>());
-  const route = (url: string, summary: string, handler: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => app.get(url, { schema: { tags: [url.includes("content") ? "Articles and assets" : "Vehicle catalog"], summary, response: { 200: { description: "Read-only AutoAPItwo response" } } } }, handler);
+  const route = (url: string, summary: string, handler: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => app.get(url, { schema: { tags: [url.includes("content") ? "Articles and assets" : "Vehicle catalog"], summary, response: { 200: { description: "Read-only Banktwo upstream response" } } } }, handler);
   route("/v1/fleet/years", "List available model years", (req, rep) => send(req, rep, deps, "/api/v1/fleet/years", false, 900));
   route("/v1/fleet/years/:year/makes", "List makes for a model year", (req, rep) => send(req, rep, deps, `/api/v1/fleet/years/${year((req.params as any).year)}/makes`, false, 900));
   route("/v1/fleet/years/:year/makes/:make/models", "List models for a year and make", (req, rep) => { const p = req.params as any; return send(req, rep, deps, `/api/v1/fleet/years/${year(p.year)}/makes/${segment(p.make, "make")}/models`, false, 900); });
   route("/v1/fleet/years/:year/makes/:make/models/:model/engines", "List configurations for a year, make, and model", (req, rep) => { const p = req.params as any; return send(req, rep, deps, `/api/v1/fleet/years/${year(p.year)}/makes/${segment(p.make, "make")}/models/${segment(p.model, "model")}/engines`, false, 900); });
-  route("/v1/fleet/carids/:carId", "Get a provider vehicle by its AutoAPItwo car ID", (req, rep) => send(req, rep, deps, `/api/v1/fleet/carids/${id((req.params as any).carId, "carId")}`, false, 900));
-  route("/v1/fleet/search/:query", "Search the AutoAPItwo vehicle catalog", (req, rep) => send(req, rep, deps, `/api/v1/fleet/search/${segment((req.params as any).query, "query")}`, false, 900));
+  route("/v1/fleet/carids/:carId", "Get a Banktwo upstream vehicle by its car ID", (req, rep) => send(req, rep, deps, `/api/v1/fleet/carids/${id((req.params as any).carId, "carId")}`, false, 900));
+  route("/v1/fleet/search/:query", "Search the Banktwo upstream vehicle catalog", (req, rep) => send(req, rep, deps, `/api/v1/fleet/search/${segment((req.params as any).query, "query")}`, false, 900));
   route("/v1/fleet/resource", "Read an allowlisted fleet resource path", (req, rep) => {
     const query = req.query as Record<string, unknown>;
     if (Object.keys(query).some((key) => key !== "path")) throw new ConnectorError("invalid_request", "Unsupported query parameter", 400);
