@@ -5,6 +5,7 @@ export type Config = {
   port: number;
   apiKeysDatabaseUrl?: string;
   upstreamBaseUrl: string;
+  publicBaseUrl: string;
   requestTimeoutMs: number;
   retryAttempts: number;
   retryDelayMs: number;
@@ -44,11 +45,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const opaqueRefSecret = env.OPAQUE_REF_SECRET?.trim();
   if (opaqueRefSecret && Buffer.byteLength(opaqueRefSecret) < 32) throw new Error("OPAQUE_REF_SECRET must contain at least 32 bytes");
   if (!opaqueRefSecret && env.NODE_ENV === "production") throw new Error("OPAQUE_REF_SECRET is required in production");
+  const publicBaseUrl = env.PUBLIC_BASE_URL?.trim() || "https://banktwo.cars.tk";
+  const publicBase = new URL(publicBaseUrl);
+  if (publicBase.protocol !== "https:" || publicBase.username || publicBase.password || publicBase.pathname !== "/" || publicBase.search || publicBase.hash) {
+    throw new Error("PUBLIC_BASE_URL must be an HTTPS origin without credentials or a path");
+  }
   return {
     host: env.HOST?.trim() || "127.0.0.1",
     port: positiveInteger(env, "PORT", 3001),
     apiKeysDatabaseUrl: env.API_KEYS_DATABASE_URL?.trim() || undefined,
     upstreamBaseUrl: upstream.origin,
+    publicBaseUrl: publicBase.origin,
     requestTimeoutMs: positiveInteger(env, "REQUEST_TIMEOUT_MS", 20_000),
     retryAttempts: positiveInteger(env, "RETRY_ATTEMPTS", 3),
     retryDelayMs: nonNegativeInteger(env, "RETRY_DELAY_MS", 250),

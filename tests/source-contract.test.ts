@@ -8,6 +8,7 @@ import type { Config } from "../src/config.js";
 
 const config: Config = {
   host: "127.0.0.1", port: 3001, upstreamBaseUrl: "https://source.test",
+  publicBaseUrl: "https://banktwo.cars.tk",
   requestTimeoutMs: 500, retryAttempts: 1, retryDelayMs: 0, retryAfterCapSeconds: 0,
   maxResponseBytes: 100_000, maxCacheEntries: 100, maxCacheBytes: 1_000_000, maxConcurrentUpstream: 4,
   cacheTtlSeconds: 60, maxClientRequestsPerWindow: 200, clientRateWindowSeconds: 60,
@@ -152,7 +153,7 @@ describe("Banktwo Source Connector v1", () => {
     expect(resource.headers["x-provider"]).toBe("banktwo");
     expect(resource.headers["x-source-sha256"]).toBe(resource.json().sha256);
     expect(resource.headers["x-source-media-type"]).toBe("application/json");
-    expect(resource.headers["x-source-locator"]).toBe("https://source.test/api/v1/content/carids/12/components/1/itypes/2/nonstandards/42");
+    expect(resource.headers["x-source-locator"]).toBe("https://banktwo.cars.tk/v1/content/carids/12/resource?path=%2Fapi%2Fv1%2Fcontent%2Fcarids%2F12%2Fcomponents%2F1%2Fitypes%2F2%2Fnonstandards%2F42");
     expect(resource.json().asset_resource_refs).toHaveLength(1);
     const assetRef = resource.json().asset_resource_refs[0];
     const asset = await authed(instance, { url: `/v1/resources/${assetRef}` });

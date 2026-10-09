@@ -2,6 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "./config.js";
 import { ConnectorError } from "./errors.js";
+import { rewriteUpstreamLinks } from "./public-links.js";
 import { rateLimit } from "./routes.js";
 import { UpstreamClient, type UpstreamResponse } from "./upstream-client.js";
 
@@ -9,7 +10,7 @@ type Dependencies = { config: Config; upstream: UpstreamClient };
 type RecordValue = Record<string, unknown>;
 type Selector = { year: number; make: string; model: string; configuration?: string; region?: string; vin?: string };
 type Article = { opaque_ref: string; title: string; category?: string; component?: string; resource_ref: string; labor_resource_ref?: string; asset_resource_refs?: string[] };
-const revision = "autoapitwo-fleet-v1";
+const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
 const pageSize = 100;
 
@@ -96,8 +97,17 @@ function page<T>(items: T[], offset: number, key: string, sourceRevision: string
   const complete = offset + slice.length >= items.length;
   return { complete, ...(complete ? {} : { next_cursor: nextCursor(key, offset + slice.length, sourceRevision) }), items: slice };
 }
-function envelope(request: FastifyRequest, result?: UpstreamResponse) {
-  return { request_id: request.id, provider: "banktwo" as const, source_revision: result?.sha256 || revision, fetched_at: new Date().toISOString(), ...(result ? { source_locator: result.sourceUri } : {}) };
+function publicLocator(deps: Dependencies, sourceUri: string): string {
+  return rewriteUpstreamLinks(JSON.stringify(sourceUri), deps.config.upstreamBaseUrl, deps.config.publicBaseUrl).slice(1, -1);
+}
+function envelope(request: FastifyRequest, deps?: Dependencies, result?: UpstreamResponse) {
+  return {
+    request_id: request.id,
+    provider: "banktwo" as const,
+    source_revision: result?.sha256 || revision,
+    fetched_at: new Date().toISOString(),
+    ...(result && deps ? { source_locator: publicLocator(deps, result.sourceUri) } : {}),
+  };
 }
 async function readJson(deps: Dependencies, path: string, ttlSeconds = deps.config.cacheTtlSeconds): Promise<{ data: unknown; source: UpstreamResponse }> {
   const source = await deps.upstream.read(path, "application/json", ttlSeconds);
@@ -222,7 +232,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     }).filter((item): item is NonNullable<typeof item> => item !== undefined);
     const result = page(items, offset, key, sourceRevision);
     reply.header("x-request-id", request.id);
-    return { ...envelope(request, source), scope, complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), items: result.items };
+    return { ...envelope(request, deps, source), scope, complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), items: result.items };
   });
   app.post("/v1/vehicle-resolutions", schema("Resolve a vehicle selector without silent selection"), async (request, reply) => {
     guard(request, reply);
@@ -232,7 +242,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const candidates = [...new Map(list(data).map((row) => candidate(row, selector, deps.config.opaqueRefSecret)).filter((item): item is NonNullable<typeof item> => item !== undefined).map((item) => [item.opaque_ref, item])).values()];
     if (candidates.length > 100) throw new ConnectorError("upstream_response_too_large", "Vehicle resolution exceeds candidate limit", 502);
     reply.header("x-request-id", request.id);
-    return { ...envelope(request, source), selector, candidates };
+    return { ...envelope(request, deps, source), selector, candidates };
   });
   app.get("/v1/vehicles/:opaqueRef/articles", schema("List all source article headings for a vehicle"), async (request, reply) => {
     guard(request, reply);
@@ -261,7 +271,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const offset = cursorOffset(body.cursor, key, source.sha256);
     const result = page(articles, offset, key, source.sha256);
     reply.header("x-request-id", request.id);
-    return { ...envelope(request, source), complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), articles: result.items };
+    return { ...envelope(request, deps, source), complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), articles: result.items };
   });
   app.get("/v1/resources/:opaqueRef", schema("Read a selected text or binary resource"), async (request, reply) => {
     guard(request, reply);
@@ -269,12 +279,12 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const source = await deps.upstream.read(path, "application/json,image/*,application/octet-stream", 3600);
     const media_type = source.contentType.split(";")[0].trim().toLowerCase();
     if (!media_type || media_type.length > 128) return malformed();
-    const provenance = envelope(request, source);
+    const provenance = envelope(request, deps, source);
     reply.header("x-request-id", request.id)
       .header("x-provider", "banktwo")
       .header("x-source-revision", provenance.source_revision)
       .header("x-fetched-at", provenance.fetched_at)
-      .header("x-source-locator", source.sourceUri)
+      .header("x-source-locator", publicLocator(deps, source.sourceUri))
       .header("x-source-sha256", source.sha256)
       .header("x-source-media-type", media_type)
       .header("cache-control", "no-store");

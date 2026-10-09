@@ -6,6 +6,7 @@ import { ConnectorError } from "../src/errors.js";
 
 const config: Config = {
   host: "127.0.0.1", port: 3001, upstreamBaseUrl: "https://autoapitwo.test",
+  publicBaseUrl: "https://banktwo.cars.tk",
   requestTimeoutMs: 500, retryAttempts: 3, retryDelayMs: 0, retryAfterCapSeconds: 0,
   maxResponseBytes: 1024, maxCacheEntries: 8, maxCacheBytes: 4096, maxConcurrentUpstream: 2,
   cacheTtlSeconds: 60, maxClientRequestsPerWindow: 10, clientRateWindowSeconds: 60,
@@ -44,13 +45,20 @@ describe("Banktwo read-only connector", () => {
   });
 
   it("serves fleet resources through the fixed upstream origin and reuses its bounded cache", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify([{ year: "2012" }]), { status: 200, headers: { "content-type": "application/json" } }));
+    const fetcher = vi.fn(async () => new Response(JSON.stringify([{
+      year: "2012",
+      _links: { self: { href: "https://autoapitwo.test/api/v1/fleet/years/2012?locale=en_US" } },
+    }]), { status: 200, headers: { "content-type": "application/json" } }));
     const instance = await app(fetcher as typeof fetch);
     const first = await get(instance, "/v1/fleet/years");
     const second = await get(instance, "/v1/fleet/years");
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toEqual([{ year: "2012" }]);
-    expect(first.headers["x-source-uri"]).toBe("https://autoapitwo.test/api/v1/fleet/years");
+    expect(first.json()).toEqual([{
+      year: "2012",
+      _links: { self: { href: "https://banktwo.cars.tk/v1/fleet/years/2012?locale=en_US" } },
+    }]);
+    expect(first.body).not.toContain("autoapitwo");
+    expect(first.headers["x-source-uri"]).toBeUndefined();
     expect(first.headers["x-content-sha256"]).toMatch(/^[a-f0-9]{64}$/);
     expect(second.statusCode).toBe(200);
     expect(fetcher).toHaveBeenCalledTimes(1);

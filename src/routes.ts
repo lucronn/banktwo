@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "./config.js";
 import { ConnectorError } from "./errors.js";
+import { rewriteUpstreamLinks } from "./public-links.js";
 import { UpstreamClient } from "./upstream-client.js";
 
 type Dependencies = { config: Config; upstream: UpstreamClient };
@@ -31,11 +32,13 @@ export function rateLimit(request: FastifyRequest, config: Config, windows: Map<
 async function send(request: FastifyRequest, reply: FastifyReply, deps: Dependencies, path: string, binary = false, ttlSeconds = deps.config.cacheTtlSeconds) {
   rateLimit(request, deps.config, reply.server.rateLimitWindows, reply);
   const result = await deps.upstream.read(path, binary ? "image/*,application/octet-stream" : "application/json", ttlSeconds);
-  reply.header("x-source-uri", result.sourceUri).header("x-content-sha256", result.sha256).header("cache-control", "no-store");
+  reply.header("x-content-sha256", result.sha256).header("cache-control", "no-store");
   if (binary) return reply.type(result.contentType).send(result.body);
-  try { JSON.parse(result.body.toString("utf8")); }
+  let text: string;
+  try { text = result.body.toString("utf8"); JSON.parse(text); }
   catch { throw new ConnectorError("upstream_error", "Banktwo upstream returned invalid JSON", 502, result.status); }
-  return reply.type(result.contentType || "application/json; charset=utf-8").send(result.body);
+  const rewritten = rewriteUpstreamLinks(text, deps.config.upstreamBaseUrl, deps.config.publicBaseUrl);
+  return reply.type(result.contentType || "application/json; charset=utf-8").send(rewritten);
 }
 
 declare module "fastify" { interface FastifyInstance { rateLimitWindows: Map<string, Window> } }
