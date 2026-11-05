@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { rewriteUpstreamLinks } from "../src/public-links.js";
 
 describe("rewriteUpstreamLinks", () => {
+  it("marks thumbnail links as binary while preserving scoped source queries", () => {
+    const source = "/api/v1/content/carids/12/thumbnails/a?locale=en_US&region=US";
+    const result = JSON.parse(rewriteUpstreamLinks(JSON.stringify({ href: source }), "https://source.test", "https://banktwo.cars.tk"));
+    const url = new URL(result.href);
+    expect(url.searchParams.get("binary")).toBe("true");
+    expect(url.searchParams.get("path")).toBe("/api/v1/content/carids/12/thumbnails/a");
+    expect(url.searchParams.get("sourceQuery")).toBe("locale=en_US&region=US");
+  });
+
   const upstream = "https://autoapitwo.vercel.app";
   const pub = "https://banktwo.cars.tk";
 

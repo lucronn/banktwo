@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { Parser } from "htmlparser2";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "./config.js";
 import { ConnectorError } from "./errors.js";
@@ -61,23 +62,29 @@ function cleanYear(value: unknown): number {
   if (!Number.isInteger(year) || year < 1886 || year > 2200) invalid("year is invalid");
   return year;
 }
-function contentPath(value: string, carId?: string, upstreamOrigin = "https://banktwo.invalid"): string {
+function contentPath(value: string, carId?: string, upstreamOrigin = "https://banktwo.invalid", allowThumbnailQuery = false): string {
   let path: string;
   try {
     const parsed = new URL(value, upstreamOrigin);
-    if (parsed.origin !== upstreamOrigin || parsed.hash || parsed.search) invalid("Resource query parameters are not supported");
-    path = parsed.pathname;
+    if (parsed.origin !== upstreamOrigin || parsed.username || parsed.password || parsed.hash) invalid("Invalid resource origin or fragment");
+    if (parsed.search) {
+      const entries = [...parsed.searchParams];
+      if (!allowThumbnailQuery || !/^\/api\/v1\/content\/carids\/\d{1,20}\/thumbnails\/[^/]+$/.test(parsed.pathname)
+        || parsed.search.length > 128 || new Set(entries.map(([key]) => key)).size !== entries.length
+        || entries.some(([key, value]) => !["locale", "region"].includes(key) || !/^[A-Za-z0-9_-]{1,32}$/.test(value))) invalid("Resource query parameters are not supported");
+    }
+    path = parsed.pathname + parsed.search;
   } catch { return invalid("Invalid resource reference"); }
   const pathname = path.split("?", 1)[0];
   const match = /^\/api\/v1\/content\/carids\/(\d{1,20})\/(.+)$/.exec(pathname);
   if (!match || path.length > 1400 || (carId && match[1] !== carId) || /%2f|%5c|%2e/i.test(pathname) || pathname.includes("\\") || pathname.split("/").some((part) => part === "." || part === "..")) invalid("Resource is outside the selected vehicle");
   return path;
 }
-function resourceRef(path: string, secret: string): string {
-  return signRef("r", contentPath(path), secret);
+function resourceRef(path: string, secret: string, allowThumbnailQuery = false): string {
+  return signRef("r", contentPath(path, undefined, undefined, allowThumbnailQuery), secret);
 }
 function pathFromResourceRef(ref: unknown, secret: string): string {
-  return contentPath(verifyRef(ref, "r", secret));
+  return contentPath(verifyRef(ref, "r", secret), undefined, undefined, true);
 }
 function cursorOffset(cursor: unknown, key: string, sourceRevision: string): number {
   if (cursor === undefined) return 0;
@@ -155,16 +162,29 @@ function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string,
   const component = display.includes(">>") ? display.split(">>")[0].trim().slice(0, 256) : "";
   return { opaque_ref: ref, title, ...(category ? { category } : {}), ...(component ? { component } : {}), resource_ref: ref, ...(category.toLowerCase().includes("labor") ? { labor_resource_ref: ref } : {}) };
 }
-function assetResourceRefs(value: unknown, carId: string, origin: string, secret: string): string[] {
+function assetResources(value: unknown, carId: string, origin: string, secret: string) {
   const refs = new Set<string>();
+  const bindings = new Map<string, { source_url: string; resource_ref: string }>();
+  const addImage = (sourceUrl: string, bind = false) => {
+    if (!/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(sourceUrl) && !/\/(?:images|graphics|thumbnails)\//i.test(sourceUrl)) return;
+    try {
+      const path = contentPath(sourceUrl, carId, origin, true);
+      const ref = resourceRef(path, secret, true);
+      if (!refs.has(ref) && refs.size >= 128) return;
+      refs.add(ref);
+      if (bind && sourceUrl.length <= 2048 && bindings.size < 128) bindings.set(sourceUrl, { source_url: sourceUrl, resource_ref: ref });
+    } catch { /* Ignore images outside the selected source vehicle or query allowlist. */ }
+  };
   const visit = (item: unknown, depth: number) => {
     if (depth > 12 || refs.size >= 128) return;
     if (typeof item === "string") {
       const linkedPaths = item.match(/(?:https?:\/\/[^"'\s<>]+)?\/api\/v1\/content\/carids\/\d{1,20}\/[^"'\s<>]+/gi) || [];
-      for (const link of linkedPaths) {
-        if (!/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(link) && !/\/(?:images|graphics|thumbnails)\//i.test(link)) continue;
-        try { refs.add(resourceRef(contentPath(link, carId, origin), secret)); } catch { /* Ignore links outside this source vehicle. */ }
-      }
+      // Attribute parsing decodes HTML entities without changing the raw content.
+      const parser = new Parser({ onopentag(name, attributes) {
+        if (name === "img" && attributes.src) addImage(attributes.src, true);
+      } }, { decodeEntities: true });
+      parser.end(item);
+      for (const link of linkedPaths) addImage(link);
       return;
     }
     if (Array.isArray(item)) { for (const child of item) visit(child, depth + 1); return; }
@@ -172,7 +192,7 @@ function assetResourceRefs(value: unknown, carId: string, origin: string, secret
     if (record) for (const child of Object.values(record)) visit(child, depth + 1);
   };
   visit(value, 0);
-  return [...refs];
+  return { refs: [...refs], bindings: [...bindings.values()] };
 }
 function searchRows(data: unknown): RecordValue[] {
   const root = object(data);
@@ -301,8 +321,8 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
       const embedded = object(object(object(value)?._embedded)?.data);
       if (!object(embedded?.article) && !object(embedded?.partsAndLabor)) return malformed();
       const kind = object(embedded?.partsAndLabor) ? "labor" : "article";
-      const assets = assetResourceRefs(value, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret);
-      return { ...provenance, kind, media_type, content, sha256: source.sha256, ...(assets.length ? { asset_resource_refs: assets } : {}) };
+      const assets = assetResources(value, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret);
+      return { ...provenance, kind, media_type, content, sha256: source.sha256, ...(assets.refs.length ? { asset_resource_refs: assets.refs } : {}), ...(assets.bindings.length ? { asset_bindings: assets.bindings } : {}) };
     }
     return { ...provenance, kind: "text", media_type, content, sha256: source.sha256 };
   });

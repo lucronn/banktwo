@@ -22,6 +22,7 @@ function rewriteApiPath(pathWithQuery: string, publicOrigin: string): string {
   if (contentMatch) {
     const params = new URLSearchParams();
     params.set("path", path);
+    if (/\/(?:images|graphics|thumbnails)\//i.test(path) || /\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)$/i.test(path)) params.set("binary", "true");
     const sourceQuery = url.searchParams.toString();
     if (sourceQuery) params.set("sourceQuery", sourceQuery);
     return `${publicOrigin}/v1/content/carids/${contentMatch[1]}/resource?${params.toString()}`;
