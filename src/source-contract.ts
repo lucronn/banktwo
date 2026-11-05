@@ -66,7 +66,7 @@ function contentPath(value: string, carId?: string, upstreamOrigin = "https://ba
   let path: string;
   try {
     const parsed = new URL(value, upstreamOrigin);
-    if (parsed.origin !== upstreamOrigin || parsed.hash) invalid("Invalid resource origin or fragment");
+    if (parsed.origin !== upstreamOrigin || parsed.username || parsed.password || parsed.hash) invalid("Invalid resource origin or fragment");
     if (parsed.search) {
       const entries = [...parsed.searchParams];
       if (!allowThumbnailQuery || !/^\/api\/v1\/content\/carids\/\d{1,20}\/thumbnails\/[^/]+$/.test(parsed.pathname)

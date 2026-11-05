@@ -190,6 +190,7 @@ describe("Banktwo Source Connector v1", () => {
   it("does not bind images outside the selected vehicle or with unsafe query parameters", async () => {
     const sources = [
       "https://other.test/api/v1/content/carids/12/thumbnails/a?locale=en_US",
+      "https://user:private@source.test/api/v1/content/carids/12/thumbnails/a?locale=en_US",
       "/api/v1/content/carids/13/thumbnails/a?locale=en_US",
       "/api/v1/content/carids/12/thumbnails/a?access_token=secret",
       "/api/v1/content/carids/12/thumbnails/a?locale=en_US&locale=en_GB",
