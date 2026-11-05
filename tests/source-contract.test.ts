@@ -161,6 +161,64 @@ describe("Banktwo Source Connector v1", () => {
     expectContract(instance, "BinaryResource", asset.json());
   });
 
+  it("binds decoded thumbnail src values to scoped opaque refs without changing source bytes", async () => {
+    const sourceUrl = "/api/v1/content/carids/12/thumbnails/a?locale=en_US&region=US";
+    const markup = `<img src="${sourceUrl.replace("&", "&amp;")}"><img src="${sourceUrl.replace("&", "&#38;")}">`;
+    const original = JSON.stringify({ car: { id: "12" }, _embedded: { data: { article: { html: markup } } } });
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/articles/42")) return new Response(original, { headers: { "content-type": "application/json" } });
+      if (url.pathname.endsWith("/thumbnails/a") && url.search === "?locale=en_US&region=US") return new Response(bytes, { headers: { "content-type": "image/jpeg" } });
+      return new Response("missing", { status: 404 });
+    });
+    const instance = await app(fetcher as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", "/api/v1/content/carids/12/articles/42")}` });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.content).toBe(original);
+    expect(body.sha256).toBe(createHash("sha256").update(original).digest("hex"));
+    expect(body.asset_bindings).toEqual([{ source_url: sourceUrl, resource_ref: signedRef("r", sourceUrl) }]);
+    expect(body.asset_resource_refs).toEqual([signedRef("r", sourceUrl)]);
+    expectContract(instance, "TextResource", body);
+    const asset = await authed(instance, { url: `/v1/resources/${body.asset_bindings[0].resource_ref}` });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.json()).toMatchObject({ kind: "asset", media_type: "image/jpeg", content_base64: bytes.toString("base64"), sha256: createHash("sha256").update(bytes).digest("hex") });
+    expectContract(instance, "BinaryResource", asset.json());
+  });
+
+  it("does not bind images outside the selected vehicle or with unsafe query parameters", async () => {
+    const sources = [
+      "https://other.test/api/v1/content/carids/12/thumbnails/a?locale=en_US",
+      "/api/v1/content/carids/13/thumbnails/a?locale=en_US",
+      "/api/v1/content/carids/12/thumbnails/a?access_token=secret",
+      "/api/v1/content/carids/12/thumbnails/a?locale=en_US&locale=en_GB",
+      "/api/v1/content/carids/12/thumbnails/a?region=%2fadmin",
+    ];
+    const original = JSON.stringify({ car: { id: "12" }, _embedded: { data: { article: { html: sources.map((src) => `<img src="${src}">`).join("") } } } });
+    const instance = await app(vi.fn(async () => new Response(original, { headers: { "content-type": "application/json" } })) as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", "/api/v1/content/carids/12/articles/42")}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().content).toBe(original);
+    expect(response.json().asset_bindings).toBeUndefined();
+    expect(response.json().asset_resource_refs).toBeUndefined();
+  });
+
+  it.each([
+    "/api/v1/content/carids/12/articles/42?locale=en_US",
+    "/api/v1/content/carids/12/thumbnails/a?access_token=secret",
+    "/api/v1/content/carids/12/thumbnails/a?locale=en_US&locale=en_GB",
+    "/api/v1/content/carids/12/thumbnails/a?region=%0aUS",
+    "/api/v1/content/carids/12/thumbnails/a?region=" + "x".repeat(33),
+  ])("rejects signed but disallowed resource queries before fetching (%s)", async (path) => {
+    const fetcher = vi.fn();
+    const instance = await app(fetcher as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", path)}` });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_INPUT");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("rejects forged resource handles and sanitizes invalid upstream payloads", async () => {
     const fetcher = vi.fn(async () => new Response("secret provider payload", { headers: { "content-type": "application/json" } }));
     const instance = await app(fetcher as typeof fetch);

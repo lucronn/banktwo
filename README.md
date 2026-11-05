@@ -39,7 +39,16 @@ The v1 API returns `provider: banktwo`, a request ID, source revision, fetch
 time, source locator, explicit page completion, and opaque references. It
 returns all matching vehicle candidates without silently selecting one.
 Resources include SHA-256 and either original source text or base64 binary
-bytes. Provider paths stay inside Banktwo and are never used to choose an
+bytes.
+Article resources can additionally declare `asset_bindings`, a bounded list of
+`{source_url, resource_ref}` pairs. `source_url` is the exact HTML-decoded
+`<img src>` value; every bound reference is also declared in
+`asset_resource_refs`. The sidecar preserves original `content` bytes and their
+SHA-256. Thumbnail references stay in the selected vehicle namespace and may
+carry only bounded `locale` and `region` queries. Other resource query strings
+remain rejected. Consumers must support the optional sidecar before deploying
+a connector that emits it.
+ Provider paths stay inside Banktwo and are never used to choose an
 arbitrary upstream origin.
 
 The previous `/v1/fleet/*` and `/v1/content/*` endpoints remain temporarily for
