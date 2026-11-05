@@ -33,7 +33,7 @@ async function send(request: FastifyRequest, reply: FastifyReply, deps: Dependen
   rateLimit(request, deps.config, reply.server.rateLimitWindows, reply);
   const result = await deps.upstream.read(path, binary ? "image/*,application/octet-stream" : "application/json", ttlSeconds);
   reply.header("x-content-sha256", result.sha256).header("cache-control", "no-store");
-  if (binary) return reply.type(result.contentType).send(result.body);
+  if (binary || result.contentType.toLowerCase().startsWith("image/")) return reply.type(result.contentType).send(result.body);
   let text: string;
   try { text = result.body.toString("utf8"); JSON.parse(text); }
   catch { throw new ConnectorError("upstream_error", "Banktwo upstream returned invalid JSON", 502, result.status); }

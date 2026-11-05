@@ -24,6 +24,16 @@ async function get(instance: FastifyInstance, url: string) {
 afterEach(async () => { await Promise.all(apps.splice(0).map((instance) => instance.close())); });
 
 describe("Banktwo read-only connector", () => {
+  it.each(["", "&binary=true"])("returns thumbnail bytes without attempting JSON parsing (%s)", async (flag) => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const instance = await app(vi.fn(async () => new Response(bytes, { headers: { "content-type": "image/jpeg" } })) as typeof fetch);
+    const path = encodeURIComponent("/api/v1/content/carids/12/thumbnails/a");
+    const response = await get(instance, `/v1/content/carids/12/resource?path=${path}${flag}`);
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("image/jpeg");
+    expect(response.rawPayload).toEqual(bytes);
+  });
+
   it("requires an API key before any catalog or article source work", async () => {
     const fetcher = vi.fn();
     const instance = await createApp(config, fetcher as typeof fetch, async () => false);
