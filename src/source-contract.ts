@@ -69,7 +69,7 @@ function contentPath(value: string, carId?: string, upstreamOrigin = "https://ba
     if (parsed.origin !== upstreamOrigin || parsed.username || parsed.password || parsed.hash) invalid("Invalid resource origin or fragment");
     if (parsed.search) {
       const entries = [...parsed.searchParams];
-      if (!allowThumbnailQuery || !/^\/api\/v1\/content\/carids\/\d{1,20}\/thumbnails\/[^/]+$/.test(parsed.pathname)
+      if (!allowThumbnailQuery || !/^\/api\/v1\/content\/carids\/\d{1,20}\/thumbnails\/[^/]+(?:\/[^/]+)*$/.test(parsed.pathname)
         || parsed.search.length > 128 || new Set(entries.map(([key]) => key)).size !== entries.length
         || entries.some(([key, value]) => !["locale", "region"].includes(key) || !/^[A-Za-z0-9_-]{1,32}$/.test(value))) invalid("Resource query parameters are not supported");
     }
@@ -299,6 +299,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const source = await deps.upstream.read(path, "application/json,image/*,application/octet-stream", 3600);
     const media_type = source.contentType.split(";")[0].trim().toLowerCase();
     if (!media_type || media_type.length > 128) return malformed();
+    const jsonMediaType = media_type === "application/json" || media_type === "application/hal+json";
     const provenance = envelope(request, deps, source);
     reply.header("x-request-id", request.id)
       .header("x-provider", "banktwo")
@@ -311,9 +312,9 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     if (media_type.startsWith("image/") || media_type === "application/octet-stream" || media_type === "application/pdf") {
       return { ...provenance, kind: "asset", media_type, content_base64: source.body.toString("base64"), sha256: source.sha256 };
     }
-    if (!media_type.startsWith("text/") && media_type !== "application/json") return malformed();
+    if (!media_type.startsWith("text/") && !jsonMediaType) return malformed();
     const content = source.body.toString("utf8");
-    if (media_type === "application/json") {
+    if (jsonMediaType) {
       const value = sourceJson(source);
       const carId = /^\/api\/v1\/content\/carids\/(\d+)/.exec(path)?.[1];
       const responseCarId = text(object(object(value)?.car)?.id);
