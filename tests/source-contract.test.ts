@@ -161,15 +161,15 @@ describe("Banktwo Source Connector v1", () => {
     expectContract(instance, "BinaryResource", asset.json());
   });
 
-  it("binds decoded thumbnail src values to scoped opaque refs without changing source bytes", async () => {
-    const sourceUrl = "/api/v1/content/carids/12/thumbnails/a?locale=en_US&region=US";
+  it.each(["application/json", "application/hal+json"])("binds decoded thumbnail src values to scoped opaque refs without changing source bytes (%s)", async (mediaType) => {
+    const sourceUrl = "/api/v1/content/carids/12/thumbnails/group/image/variant?locale=en_US&region=US";
     const markup = `<img src="${sourceUrl.replace("&", "&amp;")}"><img src="${sourceUrl.replace("&", "&#38;")}">`;
     const original = JSON.stringify({ car: { id: "12" }, _embedded: { data: { article: { html: markup } } } });
     const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
-      if (url.pathname.endsWith("/articles/42")) return new Response(original, { headers: { "content-type": "application/json" } });
-      if (url.pathname.endsWith("/thumbnails/a") && url.search === "?locale=en_US&region=US") return new Response(bytes, { headers: { "content-type": "image/jpeg" } });
+      if (url.pathname.endsWith("/articles/42")) return new Response(original, { headers: { "content-type": mediaType } });
+      if (url.pathname.endsWith("/thumbnails/group/image/variant") && url.search === "?locale=en_US&region=US") return new Response(bytes, { headers: { "content-type": "image/jpeg" } });
       return new Response("missing", { status: 404 });
     });
     const instance = await app(fetcher as typeof fetch);
@@ -177,6 +177,7 @@ describe("Banktwo Source Connector v1", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.content).toBe(original);
+    expect(body.media_type).toBe(mediaType);
     expect(body.sha256).toBe(createHash("sha256").update(original).digest("hex"));
     expect(body.asset_bindings).toEqual([{ source_url: sourceUrl, resource_ref: signedRef("r", sourceUrl) }]);
     expect(body.asset_resource_refs).toEqual([signedRef("r", sourceUrl)]);
