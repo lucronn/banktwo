@@ -30,6 +30,9 @@
     "yaml": "^2.9.1"
   },
   "overrides": {
-    "@fastify/static": "10.1.10"
+    "@fastify/static": {
+      ".": "10.1.10",
+      "content-disposition": "2.0.0"
+    }
   }
 }
