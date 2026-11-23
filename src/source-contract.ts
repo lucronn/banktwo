@@ -62,14 +62,14 @@ function cleanYear(value: unknown): number {
   if (!Number.isInteger(year) || year < 1886 || year > 2200) invalid("year is invalid");
   return year;
 }
-function contentPath(value: string, carId?: string, upstreamOrigin = "https://banktwo.invalid", allowThumbnailQuery = false): string {
+function contentPath(value: string, carId?: string, upstreamOrigin = "https://banktwo.invalid"): string {
   let path: string;
   try {
     const parsed = new URL(value, upstreamOrigin);
     if (parsed.origin !== upstreamOrigin || parsed.username || parsed.password || parsed.hash) invalid("Invalid resource origin or fragment");
     if (parsed.search) {
       const entries = [...parsed.searchParams];
-      if (!allowThumbnailQuery || !/^\/api\/v1\/content\/carids\/\d{1,20}\/thumbnails\/[^/]+(?:\/[^/]+)*$/.test(parsed.pathname)
+      if (!/^\/api\/v1\/content\/carids\/\d{1,20}\/(?:components|thumbnails)\/[^/]+(?:\/[^/]+)*$/.test(parsed.pathname)
         || parsed.search.length > 128 || new Set(entries.map(([key]) => key)).size !== entries.length
         || entries.some(([key, value]) => !["locale", "region"].includes(key) || !/^[A-Za-z0-9_-]{1,32}$/.test(value))) invalid("Resource query parameters are not supported");
     }
@@ -80,11 +80,11 @@ function contentPath(value: string, carId?: string, upstreamOrigin = "https://ba
   if (!match || path.length > 1400 || (carId && match[1] !== carId) || /%2f|%5c|%2e/i.test(pathname) || pathname.includes("\\") || pathname.split("/").some((part) => part === "." || part === "..")) invalid("Resource is outside the selected vehicle");
   return path;
 }
-function resourceRef(path: string, secret: string, allowThumbnailQuery = false): string {
-  return signRef("r", contentPath(path, undefined, undefined, allowThumbnailQuery), secret);
+function resourceRef(path: string, secret: string): string {
+  return signRef("r", contentPath(path), secret);
 }
 function pathFromResourceRef(ref: unknown, secret: string): string {
-  return contentPath(verifyRef(ref, "r", secret), undefined, undefined, true);
+  return contentPath(verifyRef(ref, "r", secret));
 }
 function cursorOffset(cursor: unknown, key: string, sourceRevision: string): number {
   if (cursor === undefined) return 0;
@@ -168,8 +168,8 @@ function assetResources(value: unknown, carId: string, origin: string, secret: s
   const addImage = (sourceUrl: string, bind = false) => {
     if (!/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(sourceUrl) && !/\/(?:images|graphics|thumbnails)\//i.test(sourceUrl)) return;
     try {
-      const path = contentPath(sourceUrl, carId, origin, true);
-      const ref = resourceRef(path, secret, true);
+      const path = contentPath(sourceUrl, carId, origin);
+      const ref = resourceRef(path, secret);
       if (!refs.has(ref) && refs.size >= 128) return;
       refs.add(ref);
       if (bind && sourceUrl.length <= 2048 && bindings.size < 128) bindings.set(sourceUrl, { source_url: sourceUrl, resource_ref: ref });
