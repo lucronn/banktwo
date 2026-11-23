@@ -161,6 +161,40 @@ describe("Banktwo Source Connector v1", () => {
     expectContract(instance, "BinaryResource", asset.json());
   });
 
+  it("lists and opens a localized supplier article with its original body", async () => {
+    const path = "/api/v1/content/carids/12/components/1/itypes/2/nonstandards/42";
+    const raw = JSON.stringify({ car: { id: 12 }, _embedded: { data: { article: {
+      html: "<p>Inspect the oil pump.</p>",
+    } } } });
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === path) {
+        expect(url.search).toBe("?locale=en_US");
+        return new Response(raw, { headers: { "content-type": "application/hal+json" } });
+      }
+      const results = url.pathname.endsWith("/search/o")
+        ? [{ display: "Engine >> Oil Pump", _links: { self: { href: `https://source.test${path}?locale=en_US` } } }]
+        : [];
+      return json({ _embedded: { data: { results } } });
+    });
+    const instance = await app(fetcher as typeof fetch);
+    const vehicle = signedRef("v", "12");
+    const listing = await authed(instance, { url: `/v1/vehicles/${vehicle}/articles` });
+    expect(listing.statusCode).toBe(200);
+    expectContract(instance, "ArticleListResponse", listing.json());
+    expect(listing.json().articles).toHaveLength(1);
+    const ref = listing.json().articles[0].resource_ref;
+    const search = await authed(instance, { method: "POST", url: `/v1/vehicles/${vehicle}/article-search`, payload: { query: "o" } });
+    expect(search.json().articles[0].resource_ref).toBe(ref);
+    const articleResponse = await authed(instance, { url: `/v1/resources/${ref}` });
+    expect(articleResponse.statusCode).toBe(200);
+    expectContract(instance, "TextResource", articleResponse.json());
+    expect(articleResponse.json()).toMatchObject({
+      content: raw, media_type: "application/hal+json", kind: "article",
+      sha256: createHash("sha256").update(raw).digest("hex"),
+    });
+  });
+
   it.each(["application/json", "application/hal+json"])("binds decoded thumbnail src values to scoped opaque refs without changing source bytes (%s)", async (mediaType) => {
     const sourceUrl = "/api/v1/content/carids/12/thumbnails/group/image/variant?locale=en_US&region=US";
     const markup = `<img src="${sourceUrl.replace("&", "&amp;")}"><img src="${sourceUrl.replace("&", "&#38;")}">`;
@@ -238,7 +272,7 @@ describe("Banktwo Source Connector v1", () => {
   it("fails closed on article links containing signed or credential query strings", async () => {
     const fetcher = vi.fn(async () => json({ _embedded: { data: { results: [{
       display: "Engine >> Article",
-      _links: { self: { href: "/api/v1/content/carids/12/articles/42?access_token=private" } },
+      _links: { self: { href: "/api/v1/content/carids/12/components/1/itypes/2/nonstandards/42?locale=en_US&access_token=private" } },
     }] } } }));
     const instance = await app(fetcher as typeof fetch);
     const response = await authed(instance, { method: "POST", url: `/v1/vehicles/${signedRef("v", "12")}/article-search`, payload: { query: "brake" } });
