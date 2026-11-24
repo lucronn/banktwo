@@ -265,7 +265,7 @@ components:
             asset_bindings:
               type: array
               maxItems: 128
-              description: Exact HTML-decoded source image URLs associated with declared asset resource references. Raw content and its hash are unchanged.
+              description: Exact HTML-decoded source image URLs and eligible authored PDF locations associated with declared asset resource references. Raw content and its hash are unchanged.
               items:
                 type: object
                 additionalProperties: false

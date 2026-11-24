@@ -40,16 +40,17 @@ time, source locator, explicit page completion, and opaque references. It
 returns all matching vehicle candidates without silently selecting one.
 Resources include SHA-256 and either original source text or base64 binary
 bytes.
-Article resources can additionally declare `asset_bindings`, a bounded list of
-`{source_url, resource_ref}` pairs. `source_url` is the exact HTML-decoded
-`<img src>` value; every bound reference is also declared in
-`asset_resource_refs`. The sidecar preserves original `content` bytes and their
-SHA-256. Thumbnail references stay in the selected vehicle namespace and may
-carry only bounded `locale` and `region` queries. Other resource query strings
-remain rejected. Consumers must support the optional sidecar before deploying
-a connector that emits it.
- Provider paths stay inside Banktwo and are never used to choose an
-arbitrary upstream origin.
+Article resources can declare `asset_bindings`, a bounded list of
+`{source_url, resource_ref}` pairs. `source_url` preserves the exact
+HTML-decoded attribute, and each bound reference is declared in
+`asset_resource_refs`. Banktwo binds `<img src>` in article JSON and eligible
+PDF links and embeds in article HTML, including HTML alongside structured HAL
+blocks. A consumer verifies the returned media type and PDF bytes before
+using the document. The sidecar preserves the original `content` and SHA-256.
+References stay on the configured source origin and in the selected vehicle
+namespace. Only existing `components` and `thumbnails` paths may carry
+bounded `locale` and `region` queries. Consumers must support the optional
+sidecar before deploying a connector that emits it.
 
 The previous `/v1/fleet/*` and `/v1/content/*` endpoints remain temporarily for
 existing callers during cutover. New integrations should use the Source

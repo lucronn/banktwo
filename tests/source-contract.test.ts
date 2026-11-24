@@ -222,6 +222,91 @@ describe("Banktwo Source Connector v1", () => {
     expectContract(instance, "BinaryResource", asset.json());
   });
 
+  it.each(["application/json", "application/hal+json", "text/html"])("binds authored PDF locations in source order without changing bytes (%s)", async (mediaType) => {
+    const root = "/api/v1/content/carids/12";
+    const bodyPath = `${root}/articles/42`;
+    const anchoredPath = `${root}/components/1/documents/service?locale=en_US&region=US`;
+    const anchored = `https://source.test${anchoredPath}`;
+    const iframe = `${root}/attachments/illustration`;
+    const object = `${root}/assets/illustration`;
+    const embed = `${root}/assets/service.pdf`;
+    const html = `<p>Vérifier le serrage.</p><a href="${anchored.replace("&", "&amp;")}">Service diagram</a>` +
+      `<iframe src="${iframe}"></iframe><a href="${anchored.replace("&", "&#38;")}">Repeated diagram</a>` +
+      `<object type="application/pdf" data="${object}">Fallback</object><embed src="${embed}">`;
+    const raw = mediaType === "text/html" ? html : JSON.stringify({ car: { id: 12 }, _embedded: { data: { article: {
+      content: html, blocks: [{ kind: "text", text: "Vérifier le serrage." }],
+    } } } });
+    const pdf = Buffer.from("%PDF-1.7\n% Fixture bytes\n%%EOF\n");
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === bodyPath) return new Response(raw, { headers: { "content-type": `${mediaType}; charset=utf-8` } });
+      expect(url.href).toBe(anchored);
+      expect(new Headers(init?.headers).get("accept")).toContain("application/pdf");
+      return new Response(pdf, { headers: { "content-type": "application/pdf" } });
+    });
+    const instance = await app(fetcher as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", bodyPath)}` });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    const bindings = [[anchored, anchoredPath], [iframe, iframe], [object, object], [embed, embed]].map(([source_url, path]) => ({
+      source_url, resource_ref: signedRef("r", path),
+    }));
+    expect(body).toMatchObject({ content: raw, media_type: mediaType, sha256: createHash("sha256").update(raw).digest("hex"),
+      asset_bindings: bindings, asset_resource_refs: bindings.map(binding => binding.resource_ref),
+    });
+    expectContract(instance, "TextResource", body);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const asset = await authed(instance, { url: `/v1/resources/${body.asset_bindings[0].resource_ref}` });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.json()).toMatchObject({ kind: "asset", media_type: "application/pdf", content_base64: pdf.toString("base64"),
+      sha256: createHash("sha256").update(pdf).digest("hex"),
+    });
+    expectContract(instance, "BinaryResource", asset.json());
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("omits unrelated, foreign, unscoped and ambiguous document locations", async () => {
+    const root = "/api/v1/content/carids/12";
+    const valid = `${root}/documents/good.pdf`;
+    const html = [
+      `<a href="${root}/components/2/unrelated" type="application/pdf">Unrelated article</a>`,
+      `<a href="${root}/assets/unrelated">Unrelated asset</a>`,
+      '<a href="https://foreign.test/api/v1/content/carids/12/documents/foreign.pdf">Foreign origin</a>',
+      '<a href="/api/v1/content/carids/13/documents/other.pdf">Other vehicle</a>',
+      '<a href="/documents/unscoped.pdf">Unscoped document</a>',
+      `<a href="${valid}?locale=en_US">Unapproved query namespace</a>`,
+      `<a href="${valid}#section">Fragment</a>`,
+      `<a href="${valid}" href="${root}/documents/other.pdf">Ambiguous link</a>`,
+      `<a href="${valid}" type="text/html">Wrong type</a>`,
+      `<iframe src="${valid}" srcdoc="Fallback"></iframe>`,
+      `<template><embed src="${valid}"></template>`,
+      `<aside hidden><a href="${valid}">Hidden document</a></aside>`,
+    ].join("");
+    const raw = JSON.stringify({ car: { id: 12 }, _embedded: { data: { article: { content: html } } },
+      unrelated: `<a href="${valid}">Outside article</a>`,
+    });
+    const fetcher = vi.fn(async () => new Response(raw, { headers: { "content-type": "application/hal+json" } }));
+    const instance = await app(fetcher as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", `${root}/articles/42`)}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ content: raw, sha256: createHash("sha256").update(raw).digest("hex") });
+    expect(response.json().asset_bindings).toBeUndefined();
+    expect(response.json().asset_resource_refs).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds document bindings and keeps the first authored positions", async () => {
+    const root = "/api/v1/content/carids/12";
+    const urls = Array.from({length: 130}, (_, index) => `${root}/documents/${index}`);
+    const html = urls.map(url => `<a href="${url}">Document</a>`).join("");
+    const instance = await app(vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } })) as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", `${root}/articles/42`)}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().asset_bindings.map(({source_url}: {source_url:string}) => source_url)).toEqual(urls.slice(0, 128));
+    expect(response.json().asset_resource_refs).toHaveLength(128);
+    expectContract(instance, "TextResource", response.json());
+  });
+
   it("does not bind images outside the selected vehicle or with unsafe query parameters", async () => {
     const sources = [
       "https://other.test/api/v1/content/carids/12/thumbnails/a?locale=en_US",
