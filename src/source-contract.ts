@@ -162,37 +162,84 @@ function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string,
   const component = display.includes(">>") ? display.split(">>")[0].trim().slice(0, 256) : "";
   return { opaque_ref: ref, title, ...(category ? { category } : {}), ...(component ? { component } : {}), resource_ref: ref, ...(category.toLowerCase().includes("labor") ? { labor_resource_ref: ref } : {}) };
 }
-function assetResources(value: unknown, carId: string, origin: string, secret: string) {
+function assetResources(value: unknown, carId: string, origin: string, secret: string, article?: RecordValue) {
   const refs = new Set<string>();
   const bindings = new Map<string, { source_url: string; resource_ref: string }>();
+  const standaloneHtml = typeof value === "string";
+  const structured = [article?.blocks, article?.steps].some(rows => Array.isArray(rows) && rows.length > 0);
+  const authoredField = (structured ? ["content"] : ["body", "text", "content", "html"]).find(name => {
+    const candidate = article?.[name];
+    return typeof candidate === "string" && candidate.trim();
+  });
+  const declare = (path: string, sourceUrl?: string) => {
+    const ref = resourceRef(path, secret);
+    if (!refs.has(ref) && refs.size >= 128) return;
+    refs.add(ref);
+    if (sourceUrl && sourceUrl.length <= 2048 && bindings.size < 128) bindings.set(sourceUrl, { source_url: sourceUrl, resource_ref: ref });
+  };
   const addImage = (sourceUrl: string, bind = false) => {
     if (!/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(sourceUrl) && !/\/(?:images|graphics|thumbnails)\//i.test(sourceUrl)) return;
     try {
-      const path = contentPath(sourceUrl, carId, origin);
-      const ref = resourceRef(path, secret);
-      if (!refs.has(ref) && refs.size >= 128) return;
-      refs.add(ref);
-      if (bind && sourceUrl.length <= 2048 && bindings.size < 128) bindings.set(sourceUrl, { source_url: sourceUrl, resource_ref: ref });
+      declare(contentPath(sourceUrl, carId, origin), bind ? sourceUrl : undefined);
     } catch { /* Ignore images outside the selected source vehicle or query allowlist. */ }
   };
-  const visit = (item: unknown, depth: number) => {
+  const addDocument = (sourceUrl: string, mediaType: string, anchor: boolean) => {
+    if (sourceUrl.length > 2048 || /[\u0000-\u001f\u007f-\u009f\\]/.test(sourceUrl) || bindings.size >= 128 ||
+        (mediaType && mediaType !== "application/pdf")) return;
+    try {
+      const path = contentPath(sourceUrl, carId, origin);
+      const pathname = path.split("?", 1)[0];
+      const document = /\/(?:documents|attachments|pdfs)\//i.test(pathname);
+      const asset = /\/(?:assets|images|graphics|thumbnails)\//i.test(pathname);
+      // Untyped anchors in generic asset namespaces must explicitly name a PDF.
+      if (document || (asset && (!anchor || mediaType === "application/pdf" || /\.pdf$/i.test(pathname)))) {
+        declare(path, sourceUrl);
+      }
+    } catch { /* Ignore documents outside the selected source vehicle or query allowlist. */ }
+  };
+  const visit = (item: unknown, depth: number, documentText = false) => {
     if (depth > 12 || refs.size >= 128) return;
     if (typeof item === "string") {
-      const linkedPaths = item.match(/(?:https?:\/\/[^"'\s<>]+)?\/api\/v1\/content\/carids\/\d{1,20}\/[^"'\s<>]+/gi) || [];
       // Attribute parsing decodes HTML entities without changing the raw content.
-      const parser = new Parser({ onopentag(name, attributes) {
-        if (name === "img" && attributes.src) addImage(attributes.src, true);
-      } }, { decodeEntities: true });
+      const attributesSeen = new Set<string>();
+      const duplicates = new Set<string>();
+      const hidden: boolean[] = [];
+      const parser = new Parser({
+        onopentagname() { attributesSeen.clear(); duplicates.clear(); },
+        onattribute(name) {
+          if (!documentText) return;
+          if (attributesSeen.has(name)) duplicates.add(name);
+          attributesSeen.add(name);
+        },
+        onopentag(name, attributes) {
+          if (!standaloneHtml && name === "img" && attributes.src) addImage(attributes.src, true);
+          if (!documentText) return;
+          const suppressed = Boolean(hidden.at(-1) || "hidden" in attributes || duplicates.has("aria-hidden") ||
+            attributes["aria-hidden"]?.trim().toLowerCase() === "true" || ["template", "noscript"].includes(name));
+          hidden.push(suppressed);
+          if (suppressed || duplicates.has("type") || (name === "iframe" && "srcdoc" in attributes)) return;
+          const attribute = name === "a" ? "href" : name === "object" ? "data" : name === "iframe" || name === "embed" ? "src" : "";
+          if (attribute && attributes[attribute] && !duplicates.has(attribute)) {
+            addDocument(attributes[attribute], attributes.type?.trim().toLowerCase() || "", name === "a");
+          }
+        },
+        onclosetag() { if (documentText) hidden.pop(); },
+      }, { decodeEntities: true });
       parser.end(item);
-      for (const link of linkedPaths) addImage(link);
+      if (!standaloneHtml) {
+        const linkedPaths = item.match(/(?:https?:\/\/[^"'\s<>]+)?\/api\/v1\/content\/carids\/\d{1,20}\/[^"'\s<>]+/gi) || [];
+        for (const link of linkedPaths) addImage(link);
+      }
       return;
     }
     if (Array.isArray(item)) { for (const child of item) visit(child, depth + 1); return; }
     const record = object(item);
-    if (record) for (const child of Object.values(record)) visit(child, depth + 1);
+    if (record) for (const [name, child] of Object.entries(record)) {
+      visit(child, depth + 1, record === article && name === authoredField);
+    }
   };
-  visit(value, 0);
-  return { refs: [...refs], bindings: [...bindings.values()] };
+  visit(value, 0, standaloneHtml);
+  return { ...(refs.size ? { asset_resource_refs: [...refs] } : {}), ...(bindings.size ? { asset_bindings: [...bindings.values()] } : {}) };
 }
 function searchRows(data: unknown): RecordValue[] {
   const root = object(data);
@@ -296,7 +343,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
   app.get("/v1/resources/:opaqueRef", schema("Read a selected text or binary resource"), async (request, reply) => {
     guard(request, reply);
     const path = pathFromResourceRef((request.params as RecordValue).opaqueRef, deps.config.opaqueRefSecret);
-    const source = await deps.upstream.read(path, "application/json,image/*,application/octet-stream", 3600);
+    const source = await deps.upstream.read(path, "application/json,image/*,application/octet-stream,application/pdf", 3600);
     const media_type = source.contentType.split(";")[0].trim().toLowerCase();
     if (!media_type || media_type.length > 128) return malformed();
     const jsonMediaType = media_type === "application/json" || media_type === "application/hal+json";
@@ -314,17 +361,19 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     }
     if (!media_type.startsWith("text/") && !jsonMediaType) return malformed();
     const content = source.body.toString("utf8");
+    const carId = /^\/api\/v1\/content\/carids\/(\d+)\//.exec(path)?.[1];
     if (jsonMediaType) {
       const value = sourceJson(source);
-      const carId = /^\/api\/v1\/content\/carids\/(\d+)/.exec(path)?.[1];
       const responseCarId = text(object(object(value)?.car)?.id);
       if (!carId || responseCarId !== carId) return malformed();
       const embedded = object(object(object(value)?._embedded)?.data);
-      if (!object(embedded?.article) && !object(embedded?.partsAndLabor)) return malformed();
+      const article = object(embedded?.article);
+      if (!article && !object(embedded?.partsAndLabor)) return malformed();
       const kind = object(embedded?.partsAndLabor) ? "labor" : "article";
-      const assets = assetResources(value, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret);
-      return { ...provenance, kind, media_type, content, sha256: source.sha256, ...(assets.refs.length ? { asset_resource_refs: assets.refs } : {}), ...(assets.bindings.length ? { asset_bindings: assets.bindings } : {}) };
+      const assets = assetResources(value, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret, article);
+      return { ...provenance, kind, media_type, content, sha256: source.sha256, ...assets };
     }
-    return { ...provenance, kind: "text", media_type, content, sha256: source.sha256 };
+    const assets = media_type === "text/html" && carId ? assetResources(content, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret) : {};
+    return { ...provenance, kind: "text", media_type, content, sha256: source.sha256, ...assets };
   });
 }
