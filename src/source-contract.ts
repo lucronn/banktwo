@@ -14,6 +14,7 @@ type Article = { opaque_ref: string; title: string; category?: string; component
 const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
 const pageSize = 100;
+const vehicleSvgPath = /^\/api\/v1\/content\/carids\/\d{1,20}\/svgs\/[^/]+$/;
 
 function invalid(message: string): never { throw new ConnectorError("invalid_request", message, 400); }
 function malformed(): never { throw new ConnectorError("invalid_upstream_response", "Banktwo received an invalid source response", 502); }
@@ -69,8 +70,9 @@ function contentPath(value: string, carId?: string, upstreamOrigin = "https://ba
     if (parsed.origin !== upstreamOrigin || parsed.username || parsed.password || parsed.hash) invalid("Invalid resource origin or fragment");
     if (parsed.search) {
       const entries = [...parsed.searchParams];
-      if (!/^\/api\/v1\/content\/carids\/\d{1,20}\/(?:components|thumbnails)\/[^/]+(?:\/[^/]+)*$/.test(parsed.pathname)
-        || parsed.search.length > 128 || new Set(entries.map(([key]) => key)).size !== entries.length
+      const localizedPath = /^\/api\/v1\/content\/carids\/\d{1,20}\/(?:components|thumbnails)\/[^/]+(?:\/[^/]+)*$/.test(parsed.pathname)
+        || vehicleSvgPath.test(parsed.pathname);
+      if (!localizedPath || parsed.search.length > 128 || new Set(entries.map(([key]) => key)).size !== entries.length
         || entries.some(([key, value]) => !["locale", "region"].includes(key) || !/^[A-Za-z0-9_-]{1,32}$/.test(value))) invalid("Resource query parameters are not supported");
     }
     path = parsed.pathname + parsed.search;
@@ -177,10 +179,18 @@ function assetResources(value: unknown, carId: string, origin: string, secret: s
     refs.add(ref);
     if (sourceUrl && sourceUrl.length <= 2048 && bindings.size < 128) bindings.set(sourceUrl, { source_url: sourceUrl, resource_ref: ref });
   };
-  const addImage = (sourceUrl: string, bind = false) => {
-    if (!/\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(sourceUrl) && !/\/(?:images|graphics|thumbnails)\//i.test(sourceUrl)) return;
+  const addImage = (sourceUrl: string, bind = false, authoredImage = false) => {
+    const knownImage = !standaloneHtml && (
+      /\.(?:png|jpe?g|gif|svg|webp|bmp|tiff?)(?:$|[?#])/i.test(sourceUrl)
+      || /\/(?:images|graphics|thumbnails)\//i.test(sourceUrl)
+    );
+    if (!knownImage && !authoredImage) return;
     try {
-      declare(contentPath(sourceUrl, carId, origin), bind ? sourceUrl : undefined);
+      const path = contentPath(sourceUrl, carId, origin);
+      const svgPath = vehicleSvgPath.test(path.split("?", 1)[0]);
+      // Localized, extensionless SVGs are bound only from the authored image tag.
+      if (!(authoredImage && svgPath) && (!knownImage || (svgPath && path.includes("?")))) return;
+      declare(path, bind ? sourceUrl : undefined);
     } catch { /* Ignore images outside the selected source vehicle or query allowlist. */ }
   };
   const addDocument = (sourceUrl: string, mediaType: string, anchor: boolean) => {
@@ -212,10 +222,12 @@ function assetResources(value: unknown, carId: string, origin: string, secret: s
           attributesSeen.add(name);
         },
         onopentag(name, attributes) {
-          if (!standaloneHtml && name === "img" && attributes.src) addImage(attributes.src, true);
-          if (!documentText) return;
           const suppressed = Boolean(hidden.at(-1) || "hidden" in attributes || duplicates.has("aria-hidden") ||
             attributes["aria-hidden"]?.trim().toLowerCase() === "true" || ["template", "noscript"].includes(name));
+          if (name === "img" && attributes.src) {
+            addImage(attributes.src, true, documentText && !suppressed && !duplicates.has("src"));
+          }
+          if (!documentText) return;
           hidden.push(suppressed);
           if (suppressed || duplicates.has("type") || (name === "iframe" && "srcdoc" in attributes)) return;
           const attribute = name === "a" ? "href" : name === "object" ? "data" : name === "iframe" || name === "embed" ? "src" : "";
