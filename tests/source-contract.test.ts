@@ -222,6 +222,51 @@ describe("Banktwo Source Connector v1", () => {
     expectContract(instance, "BinaryResource", asset.json());
   });
 
+  it.each(["application/hal+json", "text/html"])("binds an authored localized SVG after a table (%s)", async (mediaType) => {
+    const sourceUrl = "/api/v1/content/carids/12/svgs/drawing?locale=en_US&region=US";
+    const markup = [
+      "<table><tr><td>Alignment data</td></tr></table>",
+      `<img src="${sourceUrl.replace("&", "&amp;")}">`,
+      '<img src="/api/v1/content/carids/13/svgs/other?locale=en_US&region=US">',
+      '<img src="/api/v1/content/carids/12/svgs/duplicate?region=US&region=CA">',
+      '<img src="/api/v1/content/carids/12/svgs/hidden?locale=en_US" hidden>',
+      '<img src="/api/v1/content/carids/12/svgs/wrong?access_token=fixture">',
+      '<img src="/api/v1/content/carids/12/svgs/group/member?locale=en_US">',
+      '<img src="/api/v1/content/carids/12/svgs/ambiguous?locale=en_US" src="other">',
+    ].join("");
+    const original = mediaType === "text/html" ? markup : JSON.stringify({
+      car: { id: "12" }, _embedded: { data: { article: {
+        content: markup, label: '<img src="/api/v1/content/carids/12/svgs/metadata?locale=en_US">',
+      } } },
+    });
+    const bytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8"/></svg>');
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/articles/42")) return new Response(original, { headers: { "content-type": mediaType } });
+      if (url.pathname + url.search === sourceUrl) return new Response(bytes, { headers: { "content-type": "image/svg+xml" } });
+      return new Response("missing", { status: 404 });
+    });
+    const instance = await app(fetcher as typeof fetch);
+    const response = await authed(instance, { url: `/v1/resources/${signedRef("r", "/api/v1/content/carids/12/articles/42")}` });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    const ref = signedRef("r", sourceUrl);
+    expect(body.content).toBe(original);
+    expect(body.sha256).toBe(createHash("sha256").update(original).digest("hex"));
+    expect(body.asset_bindings).toEqual([{ source_url: sourceUrl, resource_ref: ref }]);
+    expect(body.asset_resource_refs).toEqual([ref]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expectContract(instance, "TextResource", body);
+    const asset = await authed(instance, { url: `/v1/resources/${ref}` });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.json()).toMatchObject({
+      kind: "asset", media_type: "image/svg+xml", content_base64: bytes.toString("base64"),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    expectContract(instance, "BinaryResource", asset.json());
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["application/json", "application/hal+json", "text/html"])("binds authored PDF locations in source order without changing bytes (%s)", async (mediaType) => {
     const root = "/api/v1/content/carids/12";
     const bodyPath = `${root}/articles/42`;
