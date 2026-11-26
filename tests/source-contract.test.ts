@@ -22,8 +22,8 @@ type SchemaValidator = {
 };
 const AjvConstructor = Ajv as unknown as new (options: Record<string, unknown>) => SchemaValidator;
 const validators = new WeakMap<FastifyInstance, SchemaValidator>();
-async function app(fetcher: typeof fetch) {
-  const instance = await createApp(config, fetcher, async () => true);
+async function app(fetcher: typeof fetch, maxResponseBytes = config.maxResponseBytes) {
+  const instance = await createApp({ ...config, maxResponseBytes }, fetcher, async () => true);
   const servedContract = await instance.inject("/openapi/source-connector-v1.yaml");
   expect(servedContract.statusCode).toBe(200);
   const validator = new AjvConstructor({ strict: false, validateFormats: false, allErrors: true });
@@ -240,6 +240,34 @@ describe("Banktwo Source Connector v1", () => {
     expect(tail.statusCode).toBe(200);
     expect(tail.json()).toMatchObject({ complete: true, source_revision: first.json().source_revision });
     expect(tail.json().next_cursor).toBeUndefined();
+    const titles = [first, batch, tail].flatMap(response => (response.json().articles as { title: string }[]).map(article => article.title));
+    expect(titles).toEqual(rows.map(row => row.title));
+  });
+
+  it("continues from the last entry when the byte limit shortens the page", async () => {
+    const rows = Array.from({ length: 600 }, (_, index) => ({
+      title: `Procedure ${String(index).padStart(3, "0")} ${"🚗".repeat(450)}`,
+      display: `${"部".repeat(256)} >> Procedure`,
+      itypeCategory: { name: `Labor ${"部".repeat(250)}` },
+      _links: { self: { href: `/api/v1/content/carids/12/articles/${"a".repeat(1300)}/${index + 1}` } },
+    }));
+    const instance = await app(vi.fn(async (input) =>
+      json({ results: new URL(String(input)).pathname.endsWith("/search/o") ? rows : [] }),
+    ) as typeof fetch, 4 * 1024 * 1024);
+    const route = `/v1/vehicles/${signedRef("v", "12")}/articles`;
+    const load = (cursor?: string) => authed(instance, {
+      url: cursor ? `${route}?cursor=${encodeURIComponent(cursor)}` : route,
+      prefer: "max-page-size=500",
+    });
+    const first = await load();
+    const batch = await load(first.json().next_cursor);
+    expect(batch.statusCode).toBe(200);
+    expect(batch.json().articles.length).toBeGreaterThan(100);
+    expect(batch.json().articles.length).toBeLessThan(500);
+    expect(Buffer.byteLength(batch.body)).toBeLessThan(4_500_000);
+    const tail = await load(batch.json().next_cursor);
+    expect(tail.statusCode).toBe(200);
+    expect(tail.json()).toMatchObject({ complete: true, source_revision: first.json().source_revision });
     const titles = [first, batch, tail].flatMap(response => (response.json().articles as { title: string }[]).map(article => article.title));
     expect(titles).toEqual(rows.map(row => row.title));
   });

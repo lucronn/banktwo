@@ -15,6 +15,7 @@ const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
 const pageSize = 100;
 const articleContinuationSize = 500;
+const articleContinuationBytes = 3 * 1024 * 1024;
 const articlePagePreference = `max-page-size=${articleContinuationSize}`;
 const vehicleSvgPath = /^\/api\/v1\/content\/carids\/\d{1,20}\/svgs\/[^/]+$/;
 
@@ -279,10 +280,22 @@ function boundedArticles(items: Article[]): Article[] {
   return [...new Map(items.map((item) => [item.opaque_ref, item])).values()].sort((a, b) => a.title.localeCompare(b.title) || a.opaque_ref.localeCompare(b.opaque_ref));
 }
 
-function articlePage(articles: Article[], key: string, cursor: unknown, legacyRevision: string, limit = pageSize) {
+function continuationLimit(articles: Article[], offset: number): number {
+  let bytes = 2; // Array brackets, with room outside the budget for the response envelope.
+  let count = 0;
+  for (const article of articles.slice(offset, offset + articleContinuationSize)) {
+    bytes += Buffer.byteLength(JSON.stringify(article)) + (count ? 1 : 0);
+    if (bytes > articleContinuationBytes) break;
+    count += 1;
+  }
+  return count;
+}
+
+function articlePage(articles: Article[], key: string, cursor: unknown, legacyRevision: string, batch = false) {
   // Bind pages to the projected article list, which excludes upstream response metadata.
   const revision = createHash("sha256").update(JSON.stringify(articles)).digest("hex");
-  const result = page(articles, cursorOffset(cursor, key, revision, legacyRevision), key, revision, limit);
+  const offset = cursorOffset(cursor, key, revision, legacyRevision);
+  const result = page(articles, offset, key, revision, batch ? continuationLimit(articles, offset) : pageSize);
   return {
     source_revision: revision,
     complete: result.complete,
@@ -347,7 +360,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined)));
     const legacyRevision = createHash("sha256").update(results.map((item) => item.source.sha256).join(":"), "utf8").digest("hex");
     const batch = query.cursor !== undefined && request.headers.prefer === articlePagePreference;
-    const result = articlePage(articles, key, query.cursor, legacyRevision, batch ? articleContinuationSize : pageSize);
+    const result = articlePage(articles, key, query.cursor, legacyRevision, batch);
     reply.header("x-request-id", request.id).header("vary", "Prefer");
     if (batch) reply.header("preference-applied", articlePagePreference);
     return { ...envelope(request), ...result };
