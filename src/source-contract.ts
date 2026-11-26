@@ -14,6 +14,9 @@ type Article = { opaque_ref: string; title: string; category?: string; component
 const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
 const pageSize = 100;
+const articleContinuationSize = 500;
+const articleContinuationBytes = 3 * 1024 * 1024;
+const articlePagePreference = `max-page-size=${articleContinuationSize}`;
 const vehicleSvgPath = /^\/api\/v1\/content\/carids\/\d{1,20}\/svgs\/[^/]+$/;
 
 function invalid(message: string): never { throw new ConnectorError("invalid_request", message, 400); }
@@ -101,8 +104,8 @@ function cursorOffset(cursor: unknown, key: string, sourceRevision: string, lega
 }
 function cursorKey(key: string): string { return createHash("sha256").update(key).digest("hex"); }
 function nextCursor(key: string, offset: number, sourceRevision: string): string { return `p.${Buffer.from(JSON.stringify({ key: cursorKey(key), offset, revision: sourceRevision })).toString("base64url")}`; }
-function page<T>(items: T[], offset: number, key: string, sourceRevision: string) {
-  const slice = items.slice(offset, offset + pageSize);
+function page<T>(items: T[], offset: number, key: string, sourceRevision: string, limit = pageSize) {
+  const slice = items.slice(offset, offset + limit);
   const complete = offset + slice.length >= items.length;
   return { complete, ...(complete ? {} : { next_cursor: nextCursor(key, offset + slice.length, sourceRevision) }), items: slice };
 }
@@ -277,10 +280,22 @@ function boundedArticles(items: Article[]): Article[] {
   return [...new Map(items.map((item) => [item.opaque_ref, item])).values()].sort((a, b) => a.title.localeCompare(b.title) || a.opaque_ref.localeCompare(b.opaque_ref));
 }
 
-function articlePage(articles: Article[], key: string, cursor: unknown, legacyRevision: string) {
+function continuationLimit(articles: Article[], offset: number): number {
+  let bytes = 2; // Array brackets, with room outside the budget for the response envelope.
+  let count = 0;
+  for (const article of articles.slice(offset, offset + articleContinuationSize)) {
+    bytes += Buffer.byteLength(JSON.stringify(article)) + (count ? 1 : 0);
+    if (bytes > articleContinuationBytes) break;
+    count += 1;
+  }
+  return count;
+}
+
+function articlePage(articles: Article[], key: string, cursor: unknown, legacyRevision: string, batch = false) {
   // Bind pages to the projected article list, which excludes upstream response metadata.
   const revision = createHash("sha256").update(JSON.stringify(articles)).digest("hex");
-  const result = page(articles, cursorOffset(cursor, key, revision, legacyRevision), key, revision);
+  const offset = cursorOffset(cursor, key, revision, legacyRevision);
+  const result = page(articles, offset, key, revision, batch ? continuationLimit(articles, offset) : pageSize);
   return {
     source_revision: revision,
     complete: result.complete,
@@ -344,8 +359,11 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const results = await Promise.all([...indexTerms].map((term) => readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, 86_400)));
     const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined)));
     const legacyRevision = createHash("sha256").update(results.map((item) => item.source.sha256).join(":"), "utf8").digest("hex");
-    reply.header("x-request-id", request.id);
-    return { ...envelope(request), ...articlePage(articles, key, query.cursor, legacyRevision) };
+    const batch = query.cursor !== undefined && request.headers.prefer === articlePagePreference;
+    const result = articlePage(articles, key, query.cursor, legacyRevision, batch);
+    reply.header("x-request-id", request.id).header("vary", "Prefer");
+    if (batch) reply.header("preference-applied", articlePagePreference);
+    return { ...envelope(request), ...result };
   });
   app.post("/v1/vehicles/:opaqueRef/article-search", schema("Search vehicle article headings"), async (request, reply) => {
     guard(request, reply);
