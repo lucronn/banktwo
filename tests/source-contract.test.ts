@@ -34,13 +34,13 @@ async function app(fetcher: typeof fetch) {
 }
 async function authed(
   instance: FastifyInstance,
-  options: { method?: "GET" | "POST"; url: string; payload?: string | object | Buffer },
+  options: { method?: "GET" | "POST"; url: string; payload?: string | object | Buffer; prefer?: string },
 ): Promise<LightMyRequestResponse> {
   return await instance.inject({
     method: options.method ?? "GET",
     url: options.url,
     payload: options.payload,
-    headers: { authorization: "Bearer adk_banktwo_fixture" },
+    headers: { authorization: "Bearer adk_banktwo_fixture", ...(options.prefer ? { prefer: options.prefer } : {}) },
   });
 }
 afterEach(async () => { await Promise.all(apps.splice(0).map((instance) => instance.close())); });
@@ -204,6 +204,44 @@ describe("Banktwo Source Connector v1", () => {
     const stale = await fetchPage(changed, cursor);
     expect(stale.statusCode).toBe(400);
     expect(stale.json().error.code).toBe("INVALID_INPUT");
+  });
+
+  it("keeps article order and revision when a continuation requests a larger page", async () => {
+    const rows = Array.from({ length: 601 }, (_, index) => ({
+      title: `Procedure ${String(index).padStart(3, "0")}`,
+      _links: { self: { href: `/api/v1/content/carids/12/articles/${index + 1}` } },
+    }));
+    const instance = await app(vi.fn(async (input) =>
+      json({ results: new URL(String(input)).pathname.endsWith("/search/o") ? rows : [] }),
+    ) as typeof fetch);
+    const route = `/v1/vehicles/${signedRef("v", "12")}/articles`;
+    const prefer = "max-page-size=500";
+    const first = await authed(instance, { url: route, prefer });
+    expect(first.statusCode).toBe(200);
+    expect(first.headers.vary).toBe("Prefer");
+    expect(first.headers["preference-applied"]).toBeUndefined();
+    expect(first.json().articles).toHaveLength(100);
+    const continuation = `${route}?cursor=${encodeURIComponent(first.json().next_cursor)}`;
+    const normal = await authed(instance, { url: continuation });
+    expect(normal.statusCode).toBe(200);
+    expect(normal.json().articles).toHaveLength(100);
+    expect(normal.headers["preference-applied"]).toBeUndefined();
+
+    const batch = await authed(instance, { url: continuation, prefer });
+    expect(batch.statusCode).toBe(200);
+    expect(batch.headers.vary).toBe("Prefer");
+    expect(batch.headers["preference-applied"]).toBe(prefer);
+    expectContract(instance, "ArticleListResponse", batch.json());
+    expect(batch.json().articles).toHaveLength(500);
+    expect(batch.json().articles.slice(0, 100)).toEqual(normal.json().articles);
+    expect(batch.json().source_revision).toBe(first.json().source_revision);
+
+    const tail = await authed(instance, { url: `${route}?cursor=${encodeURIComponent(batch.json().next_cursor)}` });
+    expect(tail.statusCode).toBe(200);
+    expect(tail.json()).toMatchObject({ complete: true, source_revision: first.json().source_revision });
+    expect(tail.json().next_cursor).toBeUndefined();
+    const titles = [first, batch, tail].flatMap(response => (response.json().articles as { title: string }[]).map(article => article.title));
+    expect(titles).toEqual(rows.map(row => row.title));
   });
 
   it("continues a legacy article search cursor when its upstream response still matches", async () => {

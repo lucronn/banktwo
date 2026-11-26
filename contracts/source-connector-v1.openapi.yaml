@@ -52,9 +52,17 @@ paths:
       parameters:
         - { name: opaqueRef, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 1024 } }
         - { name: cursor, in: query, schema: { type: string, maxLength: 512 } }
+        - name: Prefer
+          in: header
+          description: Send max-page-size=500 with a cursor to request up to 500 articles. The first page and default continuation pages contain up to 100.
+          schema: { type: string }
       responses:
         '200':
           description: A bounded article page.
+          headers:
+            Preference-Applied:
+              description: The continuation page preference, when applied.
+              schema: { type: string, enum: ['max-page-size=500'] }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ArticleListResponse' }
