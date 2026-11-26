@@ -88,7 +88,7 @@ function resourceRef(path: string, secret: string): string {
 function pathFromResourceRef(ref: unknown, secret: string): string {
   return contentPath(verifyRef(ref, "r", secret));
 }
-function cursorOffset(cursor: unknown, key: string, sourceRevision: string): number {
+function cursorOffset(cursor: unknown, key: string, sourceRevision: string, legacyRevision = sourceRevision): number {
   if (cursor === undefined) return 0;
   const raw = text(cursor);
   if (!/^p\.[A-Za-z0-9_-]{1,510}$/.test(raw)) invalid("Invalid page cursor");
@@ -96,7 +96,7 @@ function cursorOffset(cursor: unknown, key: string, sourceRevision: string): num
   try { value = JSON.parse(Buffer.from(raw.slice(2), "base64url").toString("utf8")); }
   catch { return invalid("Invalid page cursor"); }
   const parsed = object(value);
-  if (parsed?.key !== cursorKey(key) || parsed.revision !== sourceRevision || !Number.isSafeInteger(parsed.offset) || Number(parsed.offset) < 0 || Number(parsed.offset) > 100_000) invalid("Invalid page cursor");
+  if (parsed?.key !== cursorKey(key) || (parsed.revision !== sourceRevision && parsed.revision !== legacyRevision) || !Number.isSafeInteger(parsed.offset) || Number(parsed.offset) < 0 || Number(parsed.offset) > 100_000) invalid("Invalid page cursor");
   return Number(parsed.offset);
 }
 function cursorKey(key: string): string { return createHash("sha256").update(key).digest("hex"); }
@@ -277,6 +277,18 @@ function boundedArticles(items: Article[]): Article[] {
   return [...new Map(items.map((item) => [item.opaque_ref, item])).values()].sort((a, b) => a.title.localeCompare(b.title) || a.opaque_ref.localeCompare(b.opaque_ref));
 }
 
+function articlePage(articles: Article[], key: string, cursor: unknown, legacyRevision: string) {
+  // Bind pages to the projected article list, which excludes upstream response metadata.
+  const revision = createHash("sha256").update(JSON.stringify(articles)).digest("hex");
+  const result = page(articles, cursorOffset(cursor, key, revision, legacyRevision), key, revision);
+  return {
+    source_revision: revision,
+    complete: result.complete,
+    ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}),
+    articles: result.items,
+  };
+}
+
 export function registerSourceContractRoutes(app: FastifyInstance, deps: Dependencies) {
   const guard = (request: FastifyRequest, reply: FastifyReply) => rateLimit(request, deps.config, app.rateLimitWindows, reply);
   const schema = (summary: string) => ({ schema: { tags: ["Source Connector v1"], summary, response: { 200: { description: "Banktwo Source Connector v1 response" } } } });
@@ -331,11 +343,9 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const key = `articles:${carId}`;
     const results = await Promise.all([...indexTerms].map((term) => readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, 86_400)));
     const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined)));
-    const digest = createHash("sha256").update(results.map((item) => item.source.sha256).join(":"), "utf8").digest("hex");
-    const offset = cursorOffset(query.cursor, key, digest);
-    const result = page(articles, offset, key, digest);
+    const legacyRevision = createHash("sha256").update(results.map((item) => item.source.sha256).join(":"), "utf8").digest("hex");
     reply.header("x-request-id", request.id);
-    return { ...envelope(request), source_revision: digest, complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), articles: result.items };
+    return { ...envelope(request), ...articlePage(articles, key, query.cursor, legacyRevision) };
   });
   app.post("/v1/vehicles/:opaqueRef/article-search", schema("Search vehicle article headings"), async (request, reply) => {
     guard(request, reply);
@@ -347,10 +357,8 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const key = `search:${carId}:${term}`;
     const { data, source } = await readJson(deps, `/api/v1/content/carids/${carId}/search/${encoded(term)}`, 86_400);
     const articles = boundedArticles(searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined));
-    const offset = cursorOffset(body.cursor, key, source.sha256);
-    const result = page(articles, offset, key, source.sha256);
     reply.header("x-request-id", request.id);
-    return { ...envelope(request, deps, source), complete: result.complete, ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}), articles: result.items };
+    return { ...envelope(request, deps, source), ...articlePage(articles, key, body.cursor, source.sha256) };
   });
   app.get("/v1/resources/:opaqueRef", schema("Read a selected text or binary resource"), async (request, reply) => {
     guard(request, reply);

@@ -161,6 +161,71 @@ describe("Banktwo Source Connector v1", () => {
     expectContract(instance, "BinaryResource", asset.json());
   });
 
+  it.each(["list", "search"] as const)("keeps article %s cursors across equivalent upstream responses", async (operation) => {
+    const rows = Array.from({ length: 101 }, (_, index) => ({
+      ...article(index + 1),
+      title: `Procedure ${String(index).padStart(3, "0")}`,
+    }));
+    const replica = (results: typeof rows, requestStamp: string) => app(vi.fn(async (input) =>
+      json({ results: new URL(String(input)).pathname.endsWith("/search/o") ? results : [], requestStamp }),
+    ) as typeof fetch);
+    const fetchPage = (instance: FastifyInstance, cursor?: string) => {
+      const route = `/v1/vehicles/${signedRef("v", "12")}`;
+      if (operation === "search") {
+        return authed(instance, {
+          method: "POST", url: route + "/article-search", payload: { query: "o", ...(cursor ? { cursor } : {}) },
+        });
+      }
+      const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      return authed(instance, { url: route + "/articles" + suffix });
+    };
+
+    const firstReplica = await replica(rows, "first");
+    const first = await fetchPage(firstReplica);
+    expect(first.statusCode).toBe(200);
+    const { next_cursor: cursor, source_revision: revision } = first.json();
+    expectContract(firstReplica, "ArticleListResponse", first.json());
+    expect(first.json().articles).toHaveLength(100);
+    expect(first.json().complete).toBe(false);
+
+    const secondReplica = await replica([...rows].reverse(), "second");
+    const second = await fetchPage(secondReplica, cursor);
+    expect(second.statusCode).toBe(200);
+    expectContract(secondReplica, "ArticleListResponse", second.json());
+    expect(second.json()).toMatchObject({
+      source_revision: revision, complete: true, articles: [{ title: "Procedure 100" }],
+    });
+    expect(second.json().articles).toHaveLength(1);
+    expect(second.json().next_cursor).toBeUndefined();
+
+    const changed = await replica([...rows.slice(0, 100), {
+      ...rows[100], itypeCategory: { name: "Changed category" },
+    }], "third");
+    const stale = await fetchPage(changed, cursor);
+    expect(stale.statusCode).toBe(400);
+    expect(stale.json().error.code).toBe("INVALID_INPUT");
+  });
+
+  it("continues a legacy article search cursor when its upstream response still matches", async () => {
+    const results = Array.from({ length: 101 }, (_, index) => article(index + 1));
+    const raw = { results };
+    const instance = await app(vi.fn(async () => json(raw)) as typeof fetch);
+    const oldRevision = createHash("sha256").update(JSON.stringify(raw)).digest("hex");
+    const cursor = "p." + Buffer.from(JSON.stringify({
+      key: createHash("sha256").update("search:12:o").digest("hex"),
+      offset: 100,
+      revision: oldRevision,
+    })).toString("base64url");
+    const response = await authed(instance, {
+      method: "POST", url: `/v1/vehicles/${signedRef("v", "12")}/article-search`,
+      payload: { query: "o", cursor },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().complete).toBe(true);
+    expect(response.json().articles).toHaveLength(1);
+    expect(response.json().source_revision).not.toBe(oldRevision);
+  });
+
   it("lists and opens a localized supplier article with its original body", async () => {
     const path = "/api/v1/content/carids/12/components/1/itypes/2/nonstandards/42";
     const raw = JSON.stringify({ car: { id: 12 }, _embedded: { data: { article: {
