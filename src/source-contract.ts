@@ -66,6 +66,14 @@ function cleanYear(value: unknown): number {
   if (!Number.isInteger(year) || year < 1886 || year > 2200) invalid("year is invalid");
   return year;
 }
+function groupedModelSearchTerm(model: string): string | undefined {
+  const names = model.split("/").map((name) => name.trim());
+  if (names.length < 2 || names.some((name) => !/^[\p{L}\p{N}][\p{L}\p{N} .()'+_-]*$/u.test(name))) return undefined;
+  return names.join(" ");
+}
+function fleetSearchPath(year: number, make: string, model: string): string {
+  return `/api/v1/fleet/search/${encoded(`${year} ${make} ${groupedModelSearchTerm(model) ?? model}`)}`;
+}
 function contentPath(value: string, carId?: string, upstreamOrigin = "https://banktwo.invalid"): string {
   let path: string;
   try {
@@ -132,6 +140,15 @@ function upstreamCarId(row: RecordValue): string | undefined {
   const match = /\/api\/v1\/fleet\/carids\/(\d{1,20})(?:$|[?#])/.exec(linked);
   const value = text(row.id || row.carId || embedded?.carId || match?.[1]);
   return /^\d{1,20}$/.test(value) ? value : undefined;
+}
+function groupedConfigurations(data: unknown, rows: RecordValue[], year: number, make: string, model: string): RecordValue[] {
+  const result = object(data);
+  if (result?.count !== rows.length || object(result._links)?.next) return malformed();
+  const matches = rows.filter(row => Number(row.year) === year && text(row.make).toLowerCase() === make.toLowerCase()
+    && text(row.model).toLowerCase() === model.toLowerCase());
+  if (matches.length === 0) throw new ConnectorError("not_found", "No matching source configurations", 404);
+  if (matches.some(row => !upstreamCarId(row) || !text(row.engine))) return malformed();
+  return matches;
 }
 function candidate(row: RecordValue, selector: Selector, secret: string) {
   const carId = upstreamCarId(row);
@@ -320,17 +337,22 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const year = scope === "years" ? undefined : cleanYear(query.year);
     const make = scope === "models" || scope === "configurations" ? cleanSegment(query.make, "make") : undefined;
     const model = scope === "configurations" ? cleanSegment(query.model, "model") : undefined;
+    const grouped = model !== undefined && groupedModelSearchTerm(model) !== undefined;
     const path = scope === "years" ? "/api/v1/fleet/years"
       : scope === "makes" ? `/api/v1/fleet/years/${year}/makes`
       : scope === "models" ? `/api/v1/fleet/years/${year}/makes/${encoded(make!)}/models`
+      // A slash can belong to the exact listed model. Fleet search accepts its words and returns the original label.
+      : grouped ? fleetSearchPath(year!, make!, model!)
       : scope === "configurations" ? `/api/v1/fleet/years/${year}/makes/${encoded(make!)}/models/${encoded(model!)}/engines`
       : invalid("Unsupported catalog scope");
     const key = `${scope}:${year || ""}:${make || ""}:${model || ""}`;
     const { data, source } = await readJson(deps, path, 900);
     const sourceRevision = source.sha256;
     const offset = cursorOffset(query.cursor, key, sourceRevision);
-    const items = list(data).map((row) => {
-      const label = text(row.year || row.make || row.model || row.engine);
+    const rows = list(data);
+    const configurations = grouped ? groupedConfigurations(data, rows, year!, make!, model!) : rows;
+    const items = configurations.map((row) => {
+      const label = text(grouped ? row.engine : row.year || row.make || row.model || row.engine);
       if (!label) return undefined;
       const carId = upstreamCarId(row);
       const opaque_ref = carId ? vehicleRef(carId, deps.config.opaqueRefSecret) : `c.${createHash("sha256").update(`${key}:${label}`).digest("hex")}`;
@@ -343,8 +365,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
   app.post("/v1/vehicle-resolutions", schema("Resolve a vehicle selector without silent selection"), async (request, reply) => {
     guard(request, reply);
     const selector = parseSelector(request.body);
-    const query = `${selector.year} ${selector.make} ${selector.model}`;
-    const { data, source } = await readJson(deps, `/api/v1/fleet/search/${encoded(query)}`, 900);
+    const { data, source } = await readJson(deps, fleetSearchPath(selector.year, selector.make, selector.model), 900);
     const candidates = [...new Map(list(data).map((row) => candidate(row, selector, deps.config.opaqueRefSecret)).filter((item): item is NonNullable<typeof item> => item !== undefined).map((item) => [item.opaque_ref, item])).values()];
     if (candidates.length > 100) throw new ConnectorError("upstream_response_too_large", "Vehicle resolution exceeds candidate limit", 502);
     reply.header("x-request-id", request.id);
