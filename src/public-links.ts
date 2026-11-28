@@ -38,7 +38,8 @@ export function rewriteUpstreamLinks(body: string, upstreamOrigin: string, publi
   const publicOrigin = new URL(publicBaseUrl).origin;
   const absolute = new RegExp(`${escapeRegExp(upstreamOrigin)}(/api/v1/[^"'\\\\\\s]+)`, "g");
   let rewritten = body.replace(absolute, (_match, path: string) => rewriteApiPath(path, publicOrigin));
-  rewritten = rewritten.replace(/(?<=["'])\/api\/v1\/[^"']+/g, (path) => rewriteApiPath(path, publicOrigin));
+  // An escaped HTML attribute quote belongs to the JSON string, outside the URL.
+  rewritten = rewritten.replace(/(?<=["'])\/api\/v1\/[^"'\\]+/g, (path) => rewriteApiPath(path, publicOrigin));
   // Catch any leftover bare upstream origin (non-/api paths) without inventing routes.
   rewritten = rewritten.split(upstreamOrigin).join(publicOrigin);
   return rewritten;
