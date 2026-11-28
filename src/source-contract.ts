@@ -1,4 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { clearTimeout, setTimeout } from "node:timers";
+import { promisify } from "node:util";
+import { gzip, gunzip } from "node:zlib";
 import { Parser } from "htmlparser2";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "./config.js";
@@ -7,12 +10,23 @@ import { rewriteUpstreamLinks } from "./public-links.js";
 import { rateLimit } from "./routes.js";
 import { UpstreamClient, type UpstreamResponse } from "./upstream-client.js";
 
-type Dependencies = { config: Config; upstream: UpstreamClient };
+export type ArticleIndexCache = {
+  get: (key: string) => Promise<unknown>;
+  remember: (key: string, value: string, ttlSeconds: number) => void;
+};
+type Dependencies = { config: Config; upstream: UpstreamClient; articleIndexCache?: ArticleIndexCache };
 type RecordValue = Record<string, unknown>;
 type Selector = { year: number; make: string; model: string; configuration?: string; region?: string; vin?: string };
 type Article = { opaque_ref: string; title: string; category?: string; component?: string; resource_ref: string; labor_resource_ref?: string; asset_resource_refs?: string[] };
+type ArticleIndex = { articles: Article[]; legacyRevision: string; expiresAt: number };
 const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
+const articleIndexTtlSeconds = 86_400;
+const articleIndexCacheBytes = 1_900_000;
+const articleIndexSnapshotBytes = 16 * 1024 * 1024;
+const articleIndexCacheReadMs = 150;
+const zipIndex = promisify(gzip);
+const unzipIndex = promisify(gunzip);
 const pageSize = 100;
 const articleContinuationSize = 500;
 const articleContinuationBytes = 3 * 1024 * 1024;
@@ -350,6 +364,70 @@ function boundedArticles(items: Article[]): Article[] {
   return [...new Map(items.map((item) => [item.opaque_ref, item])).values()].sort((a, b) => a.title.localeCompare(b.title) || a.opaque_ref.localeCompare(b.opaque_ref));
 }
 
+async function readCachedArticleIndex(cache: ArticleIndexCache, key: string): Promise<ArticleIndex | undefined> {
+  let cancelTimeout: (() => void) | undefined;
+  try {
+    const value = await Promise.race([
+      cache.get(key),
+      new Promise<undefined>(resolve => {
+        const timeout = setTimeout(() => resolve(undefined), articleIndexCacheReadMs);
+        cancelTimeout = () => clearTimeout(timeout);
+      }),
+    ]);
+    if (typeof value !== "string" || Buffer.byteLength(value) > articleIndexCacheBytes) return;
+    const json = value.startsWith("gz:")
+      ? (await unzipIndex(Buffer.from(value.slice(3), "base64"), { maxOutputLength: articleIndexSnapshotBytes })).toString("utf8")
+      : value;
+    const index = JSON.parse(json) as Partial<ArticleIndex> | null;
+    if (!index || !Array.isArray(index.articles) || typeof index.legacyRevision !== "string"
+        || !sha256Pattern.test(index.legacyRevision)
+        || typeof index.expiresAt !== "number" || !Number.isSafeInteger(index.expiresAt)
+        || index.expiresAt <= Date.now()) return;
+    return index as ArticleIndex;
+  } catch {
+    return;
+  } finally {
+    cancelTimeout?.();
+  }
+}
+
+async function rememberArticleIndex(cache: ArticleIndexCache, key: string, index: ArticleIndex) {
+  try {
+    const json = JSON.stringify(index);
+    if (Buffer.byteLength(json) > articleIndexSnapshotBytes) return;
+    const value = Buffer.byteLength(JSON.stringify(json)) <= articleIndexCacheBytes
+      ? json : "gz:" + (await zipIndex(json, { level: 3 })).toString("base64");
+    // Compute the TTL after compression so the cache cannot extend an older search response.
+    const ttl = Math.floor((index.expiresAt - Date.now()) / 1000);
+    if (ttl > 0 && Buffer.byteLength(value) <= articleIndexCacheBytes) cache.remember(key, value, ttl);
+  } catch {
+    // The source index is still available if the cache write cannot be prepared or scheduled.
+  }
+}
+
+async function readArticleIndex(deps: Dependencies, carId: string) {
+  const cache = deps.articleIndexCache;
+  const { upstreamBaseUrl, opaqueRefSecret } = deps.config;
+  const cacheKey = cache && "article-index-v2:" + createHmac("sha256", opaqueRefSecret)
+    .update(JSON.stringify([upstreamBaseUrl, carId, indexTerms])).digest("hex");
+  if (cache && cacheKey) {
+    const index = await readCachedArticleIndex(cache, cacheKey);
+    if (index) return { index, cacheHit: true };
+  }
+  const results = await Promise.all([...indexTerms].map(term =>
+    readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, articleIndexTtlSeconds)));
+  const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data)
+    .map(row => articleFromRow(row, carId, upstreamBaseUrl, opaqueRefSecret))
+    .filter((item): item is Article => item !== undefined)));
+  const index = {
+    articles,
+    legacyRevision: digest(results.map(({ source }) => source.sha256).join(":")),
+    expiresAt: Math.min(...results.map(({ source }) => source.expiresAt)),
+  };
+  if (cache && cacheKey) await rememberArticleIndex(cache, cacheKey, index);
+  return { index, cacheHit: false };
+}
+
 function continuationLimit(articles: Article[], offset: number): number {
   let bytes = 2; // Array brackets, with room outside the budget for the response envelope.
   let count = 0;
@@ -456,12 +534,13 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const query = asQuery(request);
     onlyKeys(query, ["cursor"]);
     const key = `articles:${carId}`;
-    const results = await Promise.all([...indexTerms].map((term) => readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, 86_400)));
-    const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data).map((row) => articleFromRow(row, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret)).filter((item): item is Article => item !== undefined)));
-    const legacyRevision = createHash("sha256").update(results.map((item) => item.source.sha256).join(":"), "utf8").digest("hex");
+    const started = performance.now();
+    const { index, cacheHit } = await readArticleIndex(deps, carId);
     const batch = query.cursor !== undefined && request.headers.prefer === articlePagePreference;
-    const result = articlePage(articles, key, query.cursor, legacyRevision, batch);
-    reply.header("x-request-id", request.id).header("vary", "Prefer");
+    const result = articlePage(index.articles, key, query.cursor, index.legacyRevision, batch);
+    const elapsed = (performance.now() - started).toFixed(1);
+    reply.header("x-request-id", request.id).header("vary", "Prefer").header("cache-control", "private, no-store")
+      .header("server-timing", `bt-index;dur=${elapsed};desc="${cacheHit ? "runtime cache" : "source lookup"}"`);
     if (batch) reply.header("preference-applied", articlePagePreference);
     return { ...envelope(request), ...result };
   });
