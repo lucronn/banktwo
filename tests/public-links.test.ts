@@ -38,4 +38,17 @@ describe("rewriteUpstreamLinks", () => {
     const rewritten = rewriteUpstreamLinks(JSON.stringify({ href: "/api/v1/fleet/years/2024/makes" }), upstream, pub);
     expect(JSON.parse(rewritten).href).toBe("https://banktwo.cars.tk/v1/fleet/years/2024/makes");
   });
+
+  it("preserves escaped attribute delimiters in an article response", () => {
+    const target = "/api/v1/content/carids/12/guid/fixture-procedure";
+    const content = '<a href="' + target + '">Procedure</a>'
+      + '<a href=\\"' + target + '\\">Second reference</a>';
+    const body = JSON.stringify({ _embedded: { data: { article: { content } } } });
+    const rewritten = JSON.parse(rewriteUpstreamLinks(body, upstream, pub));
+    const publicTarget = pub + "/v1/content/carids/12/resource?path=" + encodeURIComponent(target);
+    expect(rewritten._embedded.data.article.content).toBe(
+      '<a href="' + publicTarget + '">Procedure</a>'
+      + '<a href=\\"' + publicTarget + '\\">Second reference</a>',
+    );
+  });
 });
