@@ -193,17 +193,21 @@ function candidate(row: RecordValue, selector: Selector, secret: string) {
   const configurationMatch = !!selector.configuration && configuration.toLocaleLowerCase().includes(selector.configuration.toLocaleLowerCase());
   return { opaque_ref: vehicleRef(carId, secret), label, confidence: configurationMatch ? 1 : 0.8, evidence: ["year, make, and model matched source catalog", ...(configurationMatch ? ["configuration matched"] : [])] };
 }
-function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string, secret: string): Article | undefined {
+function articleFromRow(
+  row: RecordValue, carId: string, upstreamOrigin: string, secret: string, signedRefs?: Map<string, string>,
+): Article | undefined {
   const link = object(object(row._links)?.self);
   const href = text(link?.href);
   if (!href) return undefined;
-  let path: string;
-  try { path = contentPath(href, carId, upstreamOrigin); }
-  catch { return malformed(); }
+  let ref = signedRefs?.get(href);
+  if (ref === undefined) {
+    try { ref = resourceRef(contentPath(href, carId, upstreamOrigin), secret); }
+    catch { return malformed(); }
+    signedRefs?.set(href, ref);
+  }
   const display = text(row.display);
   const title = (text(row.title || row.name) || display.split(">>").at(-1)?.trim() || "").slice(0, 1000);
   if (!title) return undefined;
-  const ref = resourceRef(path, secret);
   const category = text(object(row.itypeCategory)?.name).slice(0, 256);
   const component = display.includes(">>") ? display.split(">>")[0].trim().slice(0, 256) : "";
   return { opaque_ref: ref, title, ...(category ? { category } : {}), ...(component ? { component } : {}), resource_ref: ref, ...(category.toLowerCase().includes("labor") ? { labor_resource_ref: ref } : {}) };
@@ -416,8 +420,9 @@ async function readArticleIndex(deps: Dependencies, carId: string) {
   }
   const results = await Promise.all([...indexTerms].map(term =>
     readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, articleIndexTtlSeconds)));
+  const signedRefs = new Map<string, string>();
   const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data)
-    .map(row => articleFromRow(row, carId, upstreamBaseUrl, opaqueRefSecret))
+    .map(row => articleFromRow(row, carId, upstreamBaseUrl, opaqueRefSecret, signedRefs))
     .filter((item): item is Article => item !== undefined)));
   const index = {
     articles,
