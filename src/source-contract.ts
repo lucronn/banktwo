@@ -21,6 +21,8 @@ type Article = { opaque_ref: string; title: string; category?: string; component
 type ArticleIndex = { articles: Article[]; legacyRevision: string; expiresAt: number };
 const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
+// Numeric searches often take longer. Start them alongside the letter searches.
+const indexReadOrder = "a1b2c3d4e5f6g7h8i9j0klmnopqrstuvwxyz";
 const articleIndexTtlSeconds = 86_400;
 const articleIndexCacheBytes = 1_900_000;
 const articleIndexSnapshotBytes = 16 * 1024 * 1024;
@@ -418,12 +420,26 @@ async function readArticleIndex(deps: Dependencies, carId: string) {
     const index = await readCachedArticleIndex(cache, cacheKey);
     if (index) return { index, cacheHit: true };
   }
-  const results = await Promise.all([...indexTerms].map(term =>
-    readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, articleIndexTtlSeconds)));
   const signedRefs = new Map<string, string>();
-  const articles = boundedArticles(results.flatMap(({ data }) => searchRows(data)
-    .map(row => articleFromRow(row, carId, upstreamBaseUrl, opaqueRefSecret, signedRefs))
-    .filter((item): item is Article => item !== undefined)));
+  const results = await Promise.all([...indexReadOrder].map(async term => {
+    const { data, source } = await readJson(deps, `/api/v1/content/carids/${carId}/search/${term}`, articleIndexTtlSeconds);
+    const order = indexTerms.indexOf(term);
+    // Normalize each response while the remaining searches are running.
+    try {
+      const articles = searchRows(data)
+        .map(row => articleFromRow(row, carId, upstreamBaseUrl, opaqueRefSecret, signedRefs))
+        .filter((item): item is Article => item !== undefined);
+      return { order, source, articles };
+    } catch (error) {
+      return { order, source, error };
+    }
+  }));
+  // Preserve canonical duplicate selection and the revision used by legacy cursors.
+  results.sort((a, b) => a.order - b.order);
+  const articles = boundedArticles(results.flatMap(result => {
+    if (!result.articles) throw result.error;
+    return result.articles;
+  }));
   const index = {
     articles,
     legacyRevision: digest(results.map(({ source }) => source.sha256).join(":")),
