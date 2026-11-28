@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import type { Config } from "./config.js";
 import { ConnectorError } from "./errors.js";
 
-export type UpstreamResponse = { status: number; contentType: string; body: Buffer; sourceUri: string; sha256: string };
-type CacheValue = { expiresAt: number; response: UpstreamResponse };
+type FetchedResponse = { status: number; contentType: string; body: Buffer; sourceUri: string; sha256: string };
+export type UpstreamResponse = FetchedResponse & { expiresAt: number };
 
 export class UpstreamClient {
-  private readonly cache = new Map<string, CacheValue>();
+  private readonly cache = new Map<string, UpstreamResponse>();
   private readonly pending = new Map<string, Promise<UpstreamResponse>>();
   private cacheBytes = 0;
   private activeRequests = 0;
@@ -18,20 +18,21 @@ export class UpstreamClient {
     const url = this.safeUrl(path);
     const key = `${url}\n${accept}`;
     const cached = this.cache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.response;
-    if (cached) { this.cache.delete(key); this.cacheBytes -= cached.response.body.byteLength; }
+    if (cached && cached.expiresAt > Date.now()) return cached;
+    if (cached) { this.cache.delete(key); this.cacheBytes -= cached.body.byteLength; }
     const pending = this.pending.get(key);
     if (pending) return pending;
-    const request = this.fetchResponse(url, accept).then((response) => {
+    const request = this.fetchResponse(url, accept).then((fetched) => {
+      const response = { ...fetched, expiresAt: Date.now() + ttlSeconds * 1000 };
       if (response.body.byteLength <= this.config.maxCacheBytes) {
-        this.cache.set(key, { expiresAt: Date.now() + ttlSeconds * 1000, response });
+        this.cache.set(key, response);
         this.cacheBytes += response.body.byteLength;
         while (this.cache.size > this.config.maxCacheEntries || this.cacheBytes > this.config.maxCacheBytes) {
           const firstKey = this.cache.keys().next().value;
           if (firstKey === undefined) break;
           const evicted = this.cache.get(firstKey);
           this.cache.delete(firstKey);
-          if (evicted) this.cacheBytes -= evicted.response.body.byteLength;
+          if (evicted) this.cacheBytes -= evicted.body.byteLength;
         }
       }
       return response;
@@ -53,14 +54,14 @@ export class UpstreamClient {
     return url.toString();
   }
 
-  private async fetchResponse(url: string, accept: string): Promise<UpstreamResponse> {
+  private async fetchResponse(url: string, accept: string): Promise<FetchedResponse> {
     if (this.activeRequests >= this.config.maxConcurrentUpstream) await new Promise<void>((resolve) => this.requestQueue.push(resolve));
     this.activeRequests += 1;
     try { return await this.fetchBounded(url, accept); }
     finally { this.activeRequests -= 1; this.requestQueue.shift()?.(); }
   }
 
-  private async fetchBounded(url: string, accept: string): Promise<UpstreamResponse> {
+  private async fetchBounded(url: string, accept: string): Promise<FetchedResponse> {
     let lastError: unknown;
     for (let attempt = 0; attempt < this.config.retryAttempts; attempt += 1) {
       const cooldown = this.retryAt - Date.now();
@@ -81,7 +82,7 @@ export class UpstreamClient {
     throw lastError;
   }
 
-  private async fetchOnce(url: string, accept: string): Promise<UpstreamResponse> {
+  private async fetchOnce(url: string, accept: string): Promise<FetchedResponse> {
     let response: Response;
     try {
       response = await this.fetcher(url, { method: "GET", headers: { accept }, redirect: "manual", signal: AbortSignal.timeout(this.config.requestTimeoutMs) });

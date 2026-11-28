@@ -6,11 +6,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { getCache, waitUntil } from "@vercel/functions";
 import { bearerToken, createApiKeyVerifier, type ApiKeyVerifier } from "./api-keys.js";
 import { loadConfig, type Config } from "./config.js";
 import { ConnectorError, serializeContractError, serializeError } from "./errors.js";
 import { registerRoutes } from "./routes.js";
-import { registerSourceContractRoutes } from "./source-contract.js";
+import { registerSourceContractRoutes, type ArticleIndexCache } from "./source-contract.js";
 import { UpstreamClient } from "./upstream-client.js";
 
 function sourceConnectorContractPath(): string {
@@ -29,6 +30,7 @@ export async function createApp(
   config: Config,
   fetcher: typeof fetch = fetch,
   verifyApiKey: ApiKeyVerifier = createApiKeyVerifier(config.apiKeysDatabaseUrl),
+  articleIndexCache?: ArticleIndexCache,
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, genReqId: () => randomUUID(), routerOptions: { maxParamLength: 2048 } });
   app.setErrorHandler((error, request, reply) => {
@@ -77,7 +79,7 @@ export async function createApp(
   });
   const upstream = new UpstreamClient(config, fetcher);
   registerRoutes(app, { config, upstream });
-  registerSourceContractRoutes(app, { config, upstream });
+  registerSourceContractRoutes(app, { config, upstream, articleIndexCache });
   await app.ready();
   return app;
 }
@@ -85,7 +87,16 @@ export async function createApp(
 let serverlessAppPromise: Promise<FastifyInstance> | undefined;
 
 function getServerlessApp(): Promise<FastifyInstance> {
-  if (!serverlessAppPromise) serverlessAppPromise = createApp(loadConfig());
+  if (!serverlessAppPromise) {
+    const config = loadConfig();
+    const runtimeCache = process.env.VERCEL === "1" ? getCache({ namespace: "banktwo" }) : undefined;
+    const articleIndexCache = runtimeCache && {
+      get: (key: string) => runtimeCache.get(key),
+      remember: (key: string, value: string, ttl: number) =>
+        waitUntil(runtimeCache.set(key, value, { ttl }).catch(() => undefined)),
+    };
+    serverlessAppPromise = createApp(config, undefined, undefined, articleIndexCache);
+  }
   return serverlessAppPromise;
 }
 
