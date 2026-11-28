@@ -1,5 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { clearTimeout, setTimeout } from "node:timers";
+import { promisify } from "node:util";
+import { gzip, gunzip } from "node:zlib";
 import { Parser } from "htmlparser2";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "./config.js";
@@ -21,7 +23,10 @@ const revision = "banktwo-fleet-v1";
 const indexTerms = "abcdefghijklmnopqrstuvwxyz0123456789";
 const articleIndexTtlSeconds = 86_400;
 const articleIndexCacheBytes = 1_900_000;
+const articleIndexSnapshotBytes = 16 * 1024 * 1024;
 const articleIndexCacheReadMs = 150;
+const zipIndex = promisify(gzip);
+const unzipIndex = promisify(gunzip);
 const pageSize = 100;
 const articleContinuationSize = 500;
 const articleContinuationBytes = 3 * 1024 * 1024;
@@ -370,7 +375,10 @@ async function readCachedArticleIndex(cache: ArticleIndexCache, key: string): Pr
       }),
     ]);
     if (typeof value !== "string" || Buffer.byteLength(value) > articleIndexCacheBytes) return;
-    const index = JSON.parse(value) as Partial<ArticleIndex> | null;
+    const json = value.startsWith("gz:")
+      ? (await unzipIndex(Buffer.from(value.slice(3), "base64"), { maxOutputLength: articleIndexSnapshotBytes })).toString("utf8")
+      : value;
+    const index = JSON.parse(json) as Partial<ArticleIndex> | null;
     if (!index || !Array.isArray(index.articles) || typeof index.legacyRevision !== "string"
         || !sha256Pattern.test(index.legacyRevision)
         || typeof index.expiresAt !== "number" || !Number.isSafeInteger(index.expiresAt)
@@ -383,10 +391,24 @@ async function readCachedArticleIndex(cache: ArticleIndexCache, key: string): Pr
   }
 }
 
+async function rememberArticleIndex(cache: ArticleIndexCache, key: string, index: ArticleIndex) {
+  try {
+    const json = JSON.stringify(index);
+    if (Buffer.byteLength(json) > articleIndexSnapshotBytes) return;
+    const value = Buffer.byteLength(JSON.stringify(json)) <= articleIndexCacheBytes
+      ? json : "gz:" + (await zipIndex(json, { level: 3 })).toString("base64");
+    // Compute the TTL after compression so the cache cannot extend an older search response.
+    const ttl = Math.floor((index.expiresAt - Date.now()) / 1000);
+    if (ttl > 0 && Buffer.byteLength(value) <= articleIndexCacheBytes) cache.remember(key, value, ttl);
+  } catch {
+    // The source index is still available if the cache write cannot be prepared or scheduled.
+  }
+}
+
 async function readArticleIndex(deps: Dependencies, carId: string) {
   const cache = deps.articleIndexCache;
   const { upstreamBaseUrl, opaqueRefSecret } = deps.config;
-  const cacheKey = cache && "article-index-v1:" + createHmac("sha256", opaqueRefSecret)
+  const cacheKey = cache && "article-index-v2:" + createHmac("sha256", opaqueRefSecret)
     .update(JSON.stringify([upstreamBaseUrl, carId, indexTerms])).digest("hex");
   if (cache && cacheKey) {
     const index = await readCachedArticleIndex(cache, cacheKey);
@@ -402,17 +424,7 @@ async function readArticleIndex(deps: Dependencies, carId: string) {
     legacyRevision: digest(results.map(({ source }) => source.sha256).join(":")),
     expiresAt: Math.min(...results.map(({ source }) => source.expiresAt)),
   };
-  if (cache && cacheKey) {
-    // Never extend any constituent search response's original freshness window.
-    const ttl = Math.floor((index.expiresAt - Date.now()) / 1000);
-    if (ttl > 0) {
-      const value = JSON.stringify(index);
-      if (Buffer.byteLength(JSON.stringify(value)) <= articleIndexCacheBytes) {
-        try { cache.remember(cacheKey, value, ttl); }
-        catch { /* The source index is still available if the cache write cannot be scheduled. */ }
-      }
-    }
-  }
+  if (cache && cacheKey) await rememberArticleIndex(cache, cacheKey, index);
   return { index, cacheHit: false };
 }
 
