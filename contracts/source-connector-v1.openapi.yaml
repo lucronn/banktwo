@@ -77,15 +77,30 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [query]
-              additionalProperties: false
-              properties:
-                query: { type: string, minLength: 1, maxLength: 512 }
-                cursor: { type: string, maxLength: 512 }
+              oneOf:
+                - type: object
+                  required: [query]
+                  additionalProperties: false
+                  properties:
+                    query: { type: string, minLength: 1, maxLength: 512 }
+                    cursor: { type: string, maxLength: 512 }
+                - type: object
+                  description: Resolve one visible legacy GUID link in the exact markup of a signed Banktwo parent resource in the selected vehicle.
+                  required: [parent_resource_ref, markup_sha256, authored_path_sha256]
+                  additionalProperties: false
+                  properties:
+                    parent_resource_ref: { type: string, minLength: 1, maxLength: 2048 }
+                    markup_sha256:
+                      description: SHA-256 of the UTF-8 source markup without modification.
+                      type: string
+                      pattern: '^[a-f0-9]{64}$'
+                    authored_path_sha256:
+                      description: SHA-256 of the exact upstream-relative GUID path declared in the anchor.
+                      type: string
+                      pattern: '^[a-f0-9]{64}$'
       responses:
         '200':
-          description: A bounded query result page.
+          description: A bounded query result page or one verified authored document.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ArticleListResponse' }

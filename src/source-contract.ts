@@ -18,6 +18,9 @@ const articleContinuationSize = 500;
 const articleContinuationBytes = 3 * 1024 * 1024;
 const articlePagePreference = `max-page-size=${articleContinuationSize}`;
 const vehicleSvgPath = /^\/api\/v1\/content\/carids\/\d{1,20}\/svgs\/[^/]+$/;
+const vehicleGuidPath = /^\/api\/v1\/content\/carids\/(\d{1,20})\/guid\/([A-Za-z0-9_-]{1,160})$/;
+const sha256Pattern = /^[a-f0-9]{64}$/;
+const resourceAccept = "application/json,image/*,application/octet-stream,application/pdf";
 
 function invalid(message: string): never { throw new ConnectorError("invalid_request", message, 400); }
 function malformed(): never { throw new ConnectorError("invalid_upstream_response", "Banktwo received an invalid source response", 502); }
@@ -34,6 +37,13 @@ function list(value: unknown): RecordValue[] {
 function sourceJson(result: UpstreamResponse): unknown {
   try { return JSON.parse(result.body.toString("utf8")); }
   catch { return malformed(); }
+}
+function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+function mediaType(source: UpstreamResponse): string {
+  return source.contentType.split(";")[0].trim().toLowerCase();
+}
+function isJsonResource(source: UpstreamResponse): boolean {
+  return ["application/json", "application/hal+json"].includes(mediaType(source));
 }
 function encoded(value: string): string { return encodeURIComponent(value); }
 function signRef(prefix: string, payload: string, secret: string): string {
@@ -184,15 +194,58 @@ function articleFromRow(row: RecordValue, carId: string, upstreamOrigin: string,
   const component = display.includes(">>") ? display.split(">>")[0].trim().slice(0, 256) : "";
   return { opaque_ref: ref, title, ...(category ? { category } : {}), ...(component ? { component } : {}), resource_ref: ref, ...(category.toLowerCase().includes("labor") ? { labor_resource_ref: ref } : {}) };
 }
-function assetResources(value: unknown, carId: string, origin: string, secret: string, article?: RecordValue) {
-  const refs = new Set<string>();
-  const bindings = new Map<string, { source_url: string; resource_ref: string }>();
-  const standaloneHtml = typeof value === "string";
+function markupField(article?: RecordValue): string | undefined {
   const structured = [article?.blocks, article?.steps].some(rows => Array.isArray(rows) && rows.length > 0);
-  const authoredField = (structured ? ["content"] : ["body", "text", "content", "html"]).find(name => {
+  return (structured ? ["content"] : ["body", "text", "content", "html"]).find(name => {
     const candidate = article?.[name];
     return typeof candidate === "string" && candidate.trim();
   });
+}
+function legacyGuidArticle(value: unknown, path: string, carId: string) {
+  const match = vehicleGuidPath.exec(path);
+  const root = object(value);
+  const embedded = object(root?._embedded);
+  const data = object(embedded?.data);
+  const rootCar = object(root?.car);
+  const title = typeof root?.title === "string" ? root.title.trim() : "";
+  if (match?.[1] !== carId || root?.id !== match[2] || text(object(embedded?.car)?.id) !== carId
+      || (root?.car !== undefined && text(rootCar?.id) !== carId) || !title || title.length > 1000
+      || !data || data.article !== undefined || data.partsAndLabor !== undefined
+      || typeof data.content !== "string" || !data.content.trim()) return undefined;
+  return { title, data, markup: data.content };
+}
+function unquoteAuthoredAttribute(value: string): string {
+  return value.startsWith('\\"') && value.endsWith('\\"') ? value.slice(2, -2) : value;
+}
+function authoredGuidPath(href: string, carId: string, origin: string): string | undefined {
+  const value = unquoteAuthoredAttribute(href);
+  const relative = value.startsWith(origin + "/") ? value.slice(origin.length) : value;
+  return vehicleGuidPath.exec(relative)?.[1] === carId ? relative : undefined;
+}
+function authoredGuidReference(markup: string, pathDigest: string, parent: string, carId: string, origin: string) {
+  const suppressed: boolean[] = [];
+  let hrefCount = 0;
+  let result: string | undefined;
+  new Parser({
+    onopentagname() { hrefCount = 0; },
+    onattribute(name) { if (name === "href") hrefCount++; },
+    onopentag(name, attributes) {
+      const hidden = Boolean(suppressed.at(-1) || "hidden" in attributes ||
+        attributes["aria-hidden"]?.trim().toLowerCase() === "true" || ["template", "noscript"].includes(name));
+      suppressed.push(hidden);
+      if (hidden || name !== "a" || hrefCount !== 1 || !attributes.href) return;
+      const path = authoredGuidPath(attributes.href, carId, origin);
+      if (path && path !== parent && digest(path) === pathDigest) result = path;
+    },
+    onclosetag() { suppressed.pop(); },
+  }, { decodeEntities: true }).end(markup);
+  return result;
+}
+function assetResources(value: unknown, carId: string, origin: string, secret: string, article?: RecordValue, legacy = false) {
+  const refs = new Set<string>();
+  const bindings = new Map<string, { source_url: string; resource_ref: string }>();
+  const standaloneHtml = typeof value === "string";
+  const authoredField = markupField(article);
   const declare = (path: string, sourceUrl?: string) => {
     const ref = resourceRef(path, secret);
     if (!refs.has(ref) && refs.size >= 128) return;
@@ -206,7 +259,7 @@ function assetResources(value: unknown, carId: string, origin: string, secret: s
     );
     if (!knownImage && !authoredImage) return;
     try {
-      const path = contentPath(sourceUrl, carId, origin);
+      const path = contentPath(legacy && authoredImage ? unquoteAuthoredAttribute(sourceUrl) : sourceUrl, carId, origin);
       const svgPath = vehicleSvgPath.test(path.split("?", 1)[0]);
       // Localized, extensionless SVGs are bound only from the authored image tag.
       if (!(authoredImage && svgPath) && (!knownImage || (svgPath && path.includes("?")))) return;
@@ -321,6 +374,32 @@ function articlePage(articles: Article[], key: string, cursor: unknown, legacyRe
   };
 }
 
+async function resolveAuthoredGuid(request: FastifyRequest, reply: FastifyReply, deps: Dependencies, carId: string, body: RecordValue) {
+  onlyKeys(body, ["parent_resource_ref", "markup_sha256", "authored_path_sha256"]);
+  const { markup_sha256: markupHash, authored_path_sha256: pathHash } = body;
+  if (typeof markupHash !== "string" || !sha256Pattern.test(markupHash) ||
+      typeof pathHash !== "string" || !sha256Pattern.test(pathHash)) invalid("Invalid authored reference digest");
+  const { opaqueRefSecret: secret, upstreamBaseUrl: origin } = deps.config;
+  const parent = contentPath(pathFromResourceRef(body.parent_resource_ref, secret), carId);
+  const source = await deps.upstream.read(parent, resourceAccept, 3600);
+  if (!isJsonResource(source)) return malformed();
+  const value = object(sourceJson(source));
+  const modern = object(object(object(value?._embedded)?.data)?.article);
+  const field = markupField(modern);
+  const markup = field && text(object(value?.car)?.id) === carId ? modern?.[field]
+    : legacyGuidArticle(value, parent, carId)?.markup;
+  if (typeof markup !== "string" || digest(markup) !== markupHash) invalid("Parent markup did not match");
+  const path = authoredGuidReference(markup, pathHash, parent, carId, origin);
+  if (!path) throw new ConnectorError("not_found", "The source article did not declare this reference", 404);
+  const target = await deps.upstream.read(path, resourceAccept, 3600);
+  const article = isJsonResource(target) ? legacyGuidArticle(sourceJson(target), path, carId) : undefined;
+  if (!article) return malformed();
+  const ref = resourceRef(path, secret);
+  reply.header("x-request-id", request.id).header("cache-control", "no-store");
+  return { ...envelope(request, deps, target), complete: true,
+    articles: [{ opaque_ref: ref, resource_ref: ref, title: article.title }] };
+}
+
 export function registerSourceContractRoutes(app: FastifyInstance, deps: Dependencies) {
   const guard = (request: FastifyRequest, reply: FastifyReply) => rateLimit(request, deps.config, app.rateLimitWindows, reply);
   const schema = (summary: string) => ({ schema: { tags: ["Source Connector v1"], summary, response: { 200: { description: "Banktwo Source Connector v1 response" } } } });
@@ -391,6 +470,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const carId = carIdFromRef((request.params as RecordValue).opaqueRef, deps.config.opaqueRefSecret);
     const body = object(request.body);
     if (!body) invalid("Invalid article search body");
+    if ("parent_resource_ref" in body) return resolveAuthoredGuid(request, reply, deps, carId, body);
     onlyKeys(body, ["query", "cursor"]);
     const term = cleanSegment(body.query, "query", 512);
     const key = `search:${carId}:${term}`;
@@ -402,10 +482,10 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
   app.get("/v1/resources/:opaqueRef", schema("Read a selected text or binary resource"), async (request, reply) => {
     guard(request, reply);
     const path = pathFromResourceRef((request.params as RecordValue).opaqueRef, deps.config.opaqueRefSecret);
-    const source = await deps.upstream.read(path, "application/json,image/*,application/octet-stream,application/pdf", 3600);
-    const media_type = source.contentType.split(";")[0].trim().toLowerCase();
+    const source = await deps.upstream.read(path, resourceAccept, 3600);
+    const media_type = mediaType(source);
     if (!media_type || media_type.length > 128) return malformed();
-    const jsonMediaType = media_type === "application/json" || media_type === "application/hal+json";
+    const jsonMediaType = isJsonResource(source);
     const provenance = envelope(request, deps, source);
     reply.header("x-request-id", request.id)
       .header("x-provider", "banktwo")
@@ -423,8 +503,13 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: Depende
     const carId = /^\/api\/v1\/content\/carids\/(\d+)\//.exec(path)?.[1];
     if (jsonMediaType) {
       const value = sourceJson(source);
-      const responseCarId = text(object(object(value)?.car)?.id);
-      if (!carId || responseCarId !== carId) return malformed();
+      if (!carId) return malformed();
+      const legacy = legacyGuidArticle(value, path, carId);
+      if (legacy) {
+        const assets = assetResources(value, carId, deps.config.upstreamBaseUrl, deps.config.opaqueRefSecret, legacy.data, true);
+        return { ...provenance, kind: "article", media_type, content, sha256: source.sha256, ...assets };
+      }
+      if (text(object(object(value)?.car)?.id) !== carId) return malformed();
       const embedded = object(object(object(value)?._embedded)?.data);
       const article = object(embedded?.article);
       if (!article && !object(embedded?.partsAndLabor)) return malformed();
